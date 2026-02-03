@@ -19,6 +19,17 @@ import triton
 import triton.language as tl
 import torch
 
+# Helper to pre-compute RoPE cos/sin (Llama-style)
+def precompute_rope_cos_sin(max_seq_len: int, dim: int, device, dtype=torch.float32, base: float = 10000.0):
+    """
+    Returns cos, sin of shape [max_seq_len, dim//2]
+    """
+    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim))
+    t = torch.arange(max_seq_len, device=device, dtype=torch.float32)
+    freqs = torch.einsum("i,j->ij", t, inv_freq)
+    emb = torch.cat((freqs, freqs), dim=-1)
+    return emb.cos().to(dtype), emb.sin().to(dtype)
+
 configs = [
     triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=3),
     triton.Config({'BLOCK_M': 256, 'BLOCK_N':  64}, num_warps=8, num_stages=3),
@@ -228,5 +239,34 @@ def dominus_ultra_decode(q_new, k_cache, v_cache, cos, sin, num_kv_heads: int | 
 
     return out.unsqueeze(2)
 
+# Quick correctness test (run the file)
 if __name__ == "__main__":
-    print("Dominus Ultra loaded.")
+    torch.manual_seed(42)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16
+
+    B, Hq, Hk, T, D = 1, 8, 8, 128, 64
+
+    q = torch.randn(B, Hq, T, D, device=device, dtype=dtype) * 0.1
+    k = torch.randn(B, Hk, T, D, device=device, dtype=dtype) * 0.1
+    v = torch.randn(B, Hk, T, D, device=device, dtype=dtype) * 0.1
+
+    cos, sin = precompute_rope_cos_sin(T, D, device, dtype)
+
+    out_triton, lse_triton = dominus_ultra_prefill(q, k, v, cos, sin, Hk)
+
+    # Reference torch.sdpa (no RoPE pre-applied — manual RoPE for fair comparison)
+    def apply_rope(x, cos, sin):
+        x1 = x[..., :D//2]
+        x2 = x[..., D//2:]
+        return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
+
+    q_ref = apply_rope(q.to(torch.float32), cos, sin)
+    k_ref = apply_rope(k.to(torch.float32), cos, sin)
+    out_ref = torch.nn.functional.scaled_dot_product_attention(q_ref, k_ref, v.to(torch.float32), is_causal=True)
+
+    diff = (out_triton.to(torch.float32) - out_ref).abs().max().item()
+    print(f"Max abs diff vs torch.sdpa (manual RoPE): {diff:.6f}")
+    print("Test passed if diff < 1e-3 (bf16 tolerance)")
+
+    print("Dominus Ultra ready. ❤️🚀")

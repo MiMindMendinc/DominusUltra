@@ -12,7 +12,6 @@ setup(
     name="dominus-ultra",
     version="0.1.0",
     author="MiMindMendinc",
-    author_email="",
     description="Fast causal attention kernel with RoPE + GQA support using Triton",
     long_description=long_description,
     long_description_content_type="text/markdown",

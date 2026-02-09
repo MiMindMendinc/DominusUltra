@@ -18,11 +18,33 @@ Requirements: torch>=2.4, triton>=3.0, CUDA sm_80+ (Ampere+)
 import triton
 import triton.language as tl
 import torch
+from typing import Optional, Tuple
 
-# Helper to pre-compute RoPE cos/sin (Llama-style)
-def precompute_rope_cos_sin(max_seq_len: int, dim: int, device, dtype=torch.float32, base: float = 10000.0):
+
+def precompute_rope_cos_sin(
+    max_seq_len: int,
+    dim: int,
+    device,
+    dtype=torch.float32,
+    base: float = 10000.0
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Returns cos, sin of shape [max_seq_len, dim//2]
+    Pre-compute RoPE (Rotary Position Embedding) cos/sin values.
+    
+    Args:
+        max_seq_len: Maximum sequence length to pre-compute
+        dim: Head dimension (must be even)
+        device: PyTorch device (e.g., 'cuda', 'cpu')
+        dtype: Data type for the tensors (default: torch.float32)
+        base: Base value for frequency calculation (default: 10000.0)
+    
+    Returns:
+        Tuple of (cos, sin) tensors, each of shape [max_seq_len, dim//2]
+    
+    Example:
+        >>> cos, sin = precompute_rope_cos_sin(2048, 64, 'cuda', torch.bfloat16)
+        >>> cos.shape, sin.shape
+        (torch.Size([2048, 32]), torch.Size([2048, 32]))
     """
     inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim))
     t = torch.arange(max_seq_len, device=device, dtype=torch.float32)
@@ -52,11 +74,18 @@ def prefill_kernel(
     scale: tl.constexpr,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr
 ):
+    """
+    Triton kernel for prefill phase causal attention with RoPE.
+    
+    Implements Flash Attention-style online softmax with fused RoPE application.
+    Supports Grouped Query Attention by mapping query heads to KV heads.
+    """
+    # Determine batch and head indices
     pid_m = tl.program_id(0)
     pid_bh = tl.program_id(1)
     b = pid_bh // H
     h = pid_bh % H
-    kv_h = h // (H // KvH)
+    kv_h = h // (H // KvH)  # Map query head to KV head for GQA
 
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = tl.arange(0, BLOCK_N)
@@ -135,10 +164,17 @@ def decode_kernel(
     scale: tl.constexpr,
     BLOCK_N: tl.constexpr = 128
 ):
+    """
+    Triton kernel for decode phase attention with KV cache.
+    
+    Processes a single new token against cached key-value pairs.
+    Used during autoregressive generation for efficient inference.
+    """
+    # Determine batch and head indices
     pid_bh = tl.program_id(0)
     b = pid_bh // H
     h = pid_bh % H
-    kv_h = h // (H // KvH)
+    kv_h = h // (H // KvH)  # Map query head to KV head for GQA
 
     offs_d = tl.arange(0, D)
 
@@ -196,7 +232,41 @@ def decode_kernel(
     o_ptr = Out + b*stride_ob + h*stride_oh + offs_d*stride_od
     tl.store(o_ptr, out)
 
-def dominus_ultra_prefill(q, k, v, cos, sin, num_kv_heads: int | None = None):
+def dominus_ultra_prefill(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    num_kv_heads: Optional[int] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Prefill phase attention with RoPE and optional Grouped Query Attention.
+    
+    Computes causal multi-head attention with fused Rotary Position Embeddings.
+    Supports Grouped Query Attention (GQA) and Multi-Query Attention (MQA).
+    
+    Args:
+        q: Query tensor of shape [batch, num_heads, seq_len, head_dim]
+        k: Key tensor of shape [batch, num_kv_heads, seq_len, head_dim]
+        v: Value tensor of shape [batch, num_kv_heads, seq_len, head_dim]
+        cos: Pre-computed cosine values from precompute_rope_cos_sin
+        sin: Pre-computed sine values from precompute_rope_cos_sin
+        num_kv_heads: Number of KV heads for GQA. If None, uses num_query_heads (MHA)
+    
+    Returns:
+        Tuple of:
+            - out: Output tensor of shape [batch, num_heads, seq_len, head_dim]
+            - lse: Log-sum-exp values of shape [batch, num_heads, seq_len]
+    
+    Example:
+        >>> B, Hq, Hk, T, D = 2, 32, 8, 1024, 64
+        >>> q = torch.randn(B, Hq, T, D, device='cuda', dtype=torch.bfloat16)
+        >>> k = torch.randn(B, Hk, T, D, device='cuda', dtype=torch.bfloat16)
+        >>> v = torch.randn(B, Hk, T, D, device='cuda', dtype=torch.bfloat16)
+        >>> cos, sin = precompute_rope_cos_sin(T, D, 'cuda', torch.bfloat16)
+        >>> out, lse = dominus_ultra_prefill(q, k, v, cos, sin, num_kv_heads=Hk)
+    """
     B, Hq, T, D = q.shape
     _, Hk, _, _ = k.shape
     KvH = num_kv_heads if num_kv_heads is not None else Hq
@@ -218,7 +288,39 @@ def dominus_ultra_prefill(q, k, v, cos, sin, num_kv_heads: int | None = None):
 
     return out, lse
 
-def dominus_ultra_decode(q_new, k_cache, v_cache, cos, sin, num_kv_heads: int | None = None):
+def dominus_ultra_decode(
+    q_new: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    num_kv_heads: Optional[int] = None
+) -> torch.Tensor:
+    """
+    Decode phase attention for autoregressive generation with KV cache.
+    
+    Computes attention for a single new token against cached key-value pairs.
+    Supports Grouped Query Attention (GQA) and Multi-Query Attention (MQA).
+    
+    Args:
+        q_new: New query tensor of shape [batch, num_heads, 1, head_dim]
+        k_cache: Cached key tensor of shape [batch, num_kv_heads, past_len, head_dim]
+        v_cache: Cached value tensor of shape [batch, num_kv_heads, past_len, head_dim]
+        cos: Pre-computed cosine values from precompute_rope_cos_sin
+        sin: Pre-computed sine values from precompute_rope_cos_sin
+        num_kv_heads: Number of KV heads for GQA. If None, uses num_query_heads (MHA)
+    
+    Returns:
+        Output tensor of shape [batch, num_heads, 1, head_dim]
+    
+    Example:
+        >>> B, Hq, Hk, past_T, D = 2, 32, 8, 1024, 64
+        >>> q_new = torch.randn(B, Hq, 1, D, device='cuda', dtype=torch.bfloat16)
+        >>> k_cache = torch.randn(B, Hk, past_T, D, device='cuda', dtype=torch.bfloat16)
+        >>> v_cache = torch.randn(B, Hk, past_T, D, device='cuda', dtype=torch.bfloat16)
+        >>> cos, sin = precompute_rope_cos_sin(past_T + 1, D, 'cuda', torch.bfloat16)
+        >>> out = dominus_ultra_decode(q_new, k_cache, v_cache, cos, sin, num_kv_heads=Hk)
+    """
     B, Hq, _, D = q_new.shape
     _, Hk, past_T, _ = k_cache.shape
     KvH = num_kv_heads if num_kv_heads is not None else Hq

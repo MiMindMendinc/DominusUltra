@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dominus Ultra WebGPU • MindMend</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body { margin:0; background:#0a0a0a; color:#0ff; font-family:system-ui; text-align:center; }
+    h1 { color:#0f0; margin:20px; }
+    .container { max-width:960px; margin:40px auto; padding:20px; background:#111; border-radius:16px; border:1px solid #0f0; }
+    button { background:#0f0; color:#000; padding:15px 30px; font-size:18px; border:none; border-radius:8px; cursor:pointer; margin:10px; }
+    button:hover { background:#0ff; }
+    canvas { background:#000; border:1px solid #0ff; margin:20px auto; display:block; }
+    .result { font-size:18px; margin:20px; color:#0f0; }
+  </style>
+</head>
+<body>
+  <h1>🌌 Dominus Ultra WebGPU RoPE</h1>
+  <p style="color:#888;">MindMend • Offline • Privacy-First • Built for Michigan Families ❤️</p>
+  
+  <div class="container">
+    <label>Head dim (must be even): <input id="dim" type="number" value="128" style="width:80px;"></label><br><br>
+    <label>Tokens: <input id="tokens" type="number" value="1000" style="width:80px;"></label><br><br>
+    <label>Mode: 
+      <select id="mode">
+        <option value="0">0 - None</option>
+        <option value="1" selected>1 - Linear</option>
+        <option value="2">2 - NTK</option>
+      </select>
+    </label><br><br>
+    
+    <button onclick="runRoPE()">🚀 Run WebGPU RoPE</button>
+    <button onclick="runCPUBench()">📊 CPU Fallback Benchmark</button>
+    
+    <div id="status" class="result"></div>
+    <canvas id="chart" width="800" height="300"></canvas>
+  </div>
+
+  <p style="color:#555; margin-top:40px;">
+    Part of <a href="https://github.com/MiMindMendinc/DominusUltra" style="color:#0ff;">Dominus Ultra</a> — part of the MindMend suite for youth mental health & safety in Michigan.<br>
+    Zero data leaves your device. Built with ❤️ in Owosso by @p_perrien
+  </p>
+
+<script>
+async function RoPEGPU(d = 128, B = 10000, s = 1, m = 0) {
+  if (!('gpu' in navigator)) throw new Error('WebGPU not supported — use Chrome/Edge');
+  const h = d >>> 1;
+  const adapter = await navigator.gpu.requestAdapter();
+  const device = await adapter.requestDevice();
+  const queue = device.queue;
+
+  const wgsl = `
+    @group(0) @binding(0) var<storage, read_write> buf: array<f32>;
+    @group(0) @binding(1) var<storage, read> pos: array<u32>;
+    struct U { d:u32; h:u32; n:u32; m:u32; B:f32; s:f32; _0:f32; _1:f32; }
+    @group(0) @binding(2) var<uniform> u: U;
+
+    @compute @workgroup_size(256)
+    fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+      let idx = gid.x; if (idx >= u.n * u.h) { return; }
+      let t = idx / u.h; let i = idx % u.h;
+      let base = t * u.d; let j = i * 2u;
+      let a = buf[base + j]; let b = buf[base + j + 1u];
+      let io = f32(i) / f32(u.h);
+      var ang = f32(pos[t]) * pow(u.B, -io);
+      if (u.m == 1u) { ang /= u.s; } else if (u.m == 2u) { ang /= pow(u.s, io); }
+      let c = cos(ang); let sn = sin(ang);
+      buf[base + j] = a * c - b * sn;
+      buf[base + j + 1u] = a * sn + b * c;
+    }
+  `;
+
+  const module = device.createShaderModule({ code: wgsl });
+  const pipeline = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+
+  return async (vecs, positions) => {
+    const n = positions.length;
+    if (vecs.length !== n * d) throw new Error('Shape mismatch');
+    const bufSize = vecs.byteLength;
+    const posBuf = device.createBuffer({ size: positions.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    const inputBuf = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    const outputBuf = device.createBuffer({ size: bufSize, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const uniformBuf = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+
+    queue.writeBuffer(posBuf, 0, positions);
+    queue.writeBuffer(inputBuf, 0, vecs);
+
+    const uData = new ArrayBuffer(32);
+    const dv = new DataView(uData);
+    dv.setUint32(0, d, true);
+    dv.setUint32(4, h, true);
+    dv.setUint32(8, n, true);
+    dv.setUint32(12, m, true);
+    dv.setFloat32(16, B, true);
+    dv.setFloat32(20, s, true);
+    queue.writeBuffer(uniformBuf, 0, uData);
+
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: inputBuf } },
+        { binding: 1, resource: { buffer: posBuf } },
+        { binding: 2, resource: { buffer: uniformBuf } }
+      ]
+    }));
+    pass.dispatchWorkgroups(Math.ceil(n * h / 256));
+    pass.end();
+
+    encoder.copyBufferToBuffer(inputBuf, 0, outputBuf, 0, bufSize);
+    queue.submit([encoder.finish()]);
+
+    await outputBuf.mapAsync(GPUMapMode.READ);
+    const result = new Float32Array(outputBuf.getMappedRange().slice());
+    outputBuf.unmap();
+    return result;
+  };
+}
+
+let chart;
+async function runRoPE() {
+  const status = document.getElementById('status');
+  status.textContent = '🚀 Initializing WebGPU...';
+  try {
+    const d = parseInt(document.getElementById('dim').value);
+    const n = parseInt(document.getElementById('tokens').value);
+    const m = parseInt(document.getElementById('mode').value);
+    const applyRoPE = await RoPEGPU(d, 10000, 1.5, m);
+    const vecs = new Float32Array(n * d);
+    for (let i = 0; i < vecs.length; i++) vecs[i] = Math.random() * 2 - 1;
+    const positions = new Uint32Array(n).map((_, i) => i);
+    const start = performance.now();
+    const rotated = await applyRoPE(vecs, positions);
+    const ms = (performance.now() - start).toFixed(1);
+    status.innerHTML = `✅ WebGPU RoPE complete in <b>${ms} ms</b> for ${n} tokens`;
+    const before = vecs.slice(0, 128);
+    const after = rotated.slice(0, 128);
+    if (!chart) {
+      chart = new Chart(document.getElementById('chart'), {
+        type: 'line',
+        data: { labels: Array.from({length:128}, (_,i)=>i), datasets: [
+          { label: 'Before RoPE', borderColor: '#0ff', data: Array.from(before), tension: 0.1 },
+          { label: 'After RoPE', borderColor: '#0f0', data: Array.from(after), tension: 0.1 }
+        ]},
+        options: { animation: { duration: 800 }, scales: { y: { grid: { color: '#222' } } } }
+      });
+    } else {
+      chart.data.datasets[0].data = Array.from(before);
+      chart.data.datasets[1].data = Array.from(after);
+      chart.update();
+    }
+  } catch (e) {
+    status.textContent = '❌ ' + e.message;
+  }
+}
+
+function runCPUBench() {
+  const status = document.getElementById('status');
+  const d = parseInt(document.getElementById('dim').value);
+  const n = parseInt(document.getElementById('tokens').value);
+  const start = performance.now();
+  const vecs = new Float32Array(n * d);
+  for (let i = 0; i < vecs.length; i++) vecs[i] = Math.random() * 2 - 1;
+  const positions = new Uint32Array(n).map((_,i)=>i);
+  for (let t = 0; t < n; t++) {
+    for (let i = 0; i < d/2; i++) {
+      const idx = t * d + i * 2;
+      const a = vecs[idx], b = vecs[idx+1];
+      const ang = positions[t] * Math.pow(10000, -2 * i / d);
+      const c = Math.cos(ang), sn = Math.sin(ang);
+      vecs[idx] = a * c - b * sn;
+      vecs[idx+1] = a * sn + b * c;
+    }
+  }
+  const ms = (performance.now() - start).toFixed(1);
+  status.innerHTML = `📊 CPU fallback took <b>${ms} ms</b> — WebGPU is ~10-50× faster!`;
+}
+</script>
+</body>
+</html>

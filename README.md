@@ -2,7 +2,14 @@
 
 **Fused RoPE causal attention with GQA and FP8 support—achieving 25M+ tokens/sec on NVIDIA GPUs.**
 
-`Dominus Ultra` is a cutting-edge, high-performance CUDA kernel built with OpenAI's Triton. Designed by **Michigan MindMend Inc.**, it provides an efficient, memory-safe implementation of Rotary Positional Embeddings (RoPE) and causal attention, optimized for next-generation LLM inference and training on edge hardware.
+`Dominus Ultra` is a high-performance Triton kernel engineered by **Michigan MindMend Inc.** for Rotary Positional Embeddings (RoPE) and causal attention. It focuses on long-context efficiency, GQA/MQA compatibility, and FP8 acceleration on modern NVIDIA GPUs.
+
+## ✅ Requirements
+
+- NVIDIA GPU with CUDA 12+ (Ampere or newer recommended)
+- Python 3.10+
+- PyTorch 2.4+ with CUDA wheels
+- Triton 3.0+
 
 ## 🎯 Features
 
@@ -28,14 +35,28 @@ pip install -r requirements.txt
 
 ```python
 import torch
-from dominus_ultra import DominusUltraAttention
+from dominus_ultra import (
+    precompute_rope_cos_sin,
+    dominus_ultra_prefill,
+    dominus_ultra_decode,
+)
 
-# Initialize the kernel
-attention = DominusUltraAttention(heads=12, head_dim=64, gqa_groups=4)
+device = "cuda"
+dtype = torch.bfloat16
 
-# Run inference
-q, k, v = torch.randn(3, 1, 1024, 768, device='cuda', dtype=torch.float16)
-output = attention(q, k, v)
+# Multi-head prefill (GQA example with 4 KV heads)
+B, H_q, H_kv, T, D = 1, 12, 4, 1024, 64
+q = torch.randn(B, H_q, T, D, device=device, dtype=dtype)
+k = torch.randn(B, H_kv, T, D, device=device, dtype=dtype)
+v = torch.randn(B, H_kv, T, D, device=device, dtype=dtype)
+
+cos, sin = precompute_rope_cos_sin(T, D, device, dtype)
+out, lse = dominus_ultra_prefill(q, k, v, cos, sin, num_kv_heads=H_kv)
+
+# Decode step for the next token
+q_new = torch.randn(B, H_q, 1, D, device=device, dtype=dtype)
+cos_dec, sin_dec = precompute_rope_cos_sin(T + 1, D, device, dtype)
+next_out = dominus_ultra_decode(q_new, k, v, cos_dec, sin_dec, num_kv_heads=H_kv)
 ```
 
 ## 🏗️ Architecture
@@ -84,3 +105,7 @@ MIT - Built for the people, not the platforms.
 ---
 
 **Built by Michigan MindMend Inc.** | Privacy-first AI for families | [Website](https://github.com/MiMindMendinc)
+
+## References
+
+[1] Su, J., Lu, Y., Pan, S., Murtadha, A., Wen, S., Liu, Y., & Comak, E. (2022). RoFormer: Enhanced Transformer with Rotary Position Embedding. *arXiv:2104.09864*.

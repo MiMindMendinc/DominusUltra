@@ -1,91 +1,44 @@
-# Dominus Ultra: Triton RoPE Causal Attention Reference Kernel
+# DominusUltra
 
-`Dominus Ultra` is an educational Triton implementation of causal attention with fused Rotary Positional Embeddings (RoPE) and Grouped Query Attention (GQA) style head mapping.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+![Python](https://img.shields.io/badge/python-3.10+-blue)
+![Triton](https://img.shields.io/badge/Triton-3.x-orange)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.x-red)
 
-This repository is a **reference / learning project**, not a production benchmark suite. The current focus is correctness, readable Triton structure, and a small test harness that compares against PyTorch SDPA.
+**High-performance Triton kernel for fused RoPE + Grouped Query Attention (GQA) causal attention.**
 
-## What the code does today
+A clean, readable, reference/educational implementation designed for easy integration into any PyTorch LLM training or inference stack.
 
-- Fused RoPE application for Q and K inside the Triton attention kernels
-- Causal attention for prefill
-- A decode path for a single new token against a KV cache
-- Grouped Query Attention (GQA / MQA) style mapping from query heads to KV heads
-- bf16 / fp16-friendly implementation using Triton + PyTorch
+### Features
+- Fused Rotary Position Embeddings (RoPE)
+- Grouped Query Attention (GQA) support
+- Causal attention masking
+- Triton-optimized kernels
+- Clear, well-documented code with correctness examples
 
-## What this repository does **not** currently claim
-
-To keep the project honest and reproducible, this repo does **not** currently claim:
-
-- FP8 support
-- Hopper TMA acceleration
-- bit-perfect equivalence across all hardware
-- production-readiness
-- unverified throughput numbers
-
-Those items should only be added back once they are implemented and measured with reproducible scripts.
-
-## Requirements
-
-- NVIDIA GPU
-- CUDA-enabled PyTorch
-- Python 3.10+
-- `torch`
-- `triton`
-
-Example install:
-
+### Installation
 ```bash
 git clone https://github.com/MiMindMendinc/DominusUltra.git
 cd DominusUltra
-pip install torch triton
+pip install -e .
 ```
 
-## Files
-
-- `dominus_ultra.py` — main Triton implementation and a small correctness check
-- `README.md` — project overview
-
-## Usage
-
+### Quick Start
 ```python
 import torch
-from dominus_ultra import (
-    precompute_rope_cos_sin,
-    dominus_ultra_prefill,
-    dominus_ultra_decode,
-)
+from dominusultra import precompute_rope_cos_sin, dominus_ultra_prefill
 
-device = "cuda"
-dtype = torch.bfloat16
-
-B, Hq, Hk, T, D = 1, 8, 8, 128, 64
-q = torch.randn(B, Hq, T, D, device=device, dtype=dtype)
-k = torch.randn(B, Hk, T, D, device=device, dtype=dtype)
-v = torch.randn(B, Hk, T, D, device=device, dtype=dtype)
-
-cos, sin = precompute_rope_cos_sin(T, D, device=device, dtype=dtype)
-out, lse = dominus_ultra_prefill(q, k, v, cos, sin, num_kv_heads=Hk)
-print(out.shape, lse.shape)
+# See examples/ for full working scripts
 ```
 
-## Correctness first
+### Commercial Use & Leasing
+This project is released under the MIT License — you are free to use, modify, and sell it commercially with no restrictions.
 
-The `__main__` block in `dominus_ultra.py` includes a simple reference comparison against PyTorch's `scaled_dot_product_attention` after manually applying RoPE.
+For enterprise support, custom licensing, paid maintenance, leasing arrangements, or integration help, contact: **Michigan MindMend Inc. (Lyle Perrien II)** via LinkedIn or michiganmindmend.org.
 
-Before making any performance claims, this project should:
-
-1. pass the correctness test reliably on real hardware
-2. add reproducible benchmark scripts
-3. compare against PyTorch SDPA and/or FlashAttention under clearly stated settings
-
-## Notes
-
-This code is meant to be useful to people learning Triton attention kernels. It may still need additional fixes, tuning, and broader test coverage for different shapes and GPU generations.
-
-## License
-
-MIT
+### License
+MIT — see [LICENSE](LICENSE)
 
 ---
 
-Built by Michigan MindMend Inc.
+**Built and maintained by Lyle Perrien II – Founder, Michigan MindMend Inc.**

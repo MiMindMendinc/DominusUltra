@@ -1,36 +1,67 @@
-# Dominus Ultra: Triton RoPE Causal Attention Reference Kernel
+# Dominus Ultra
 
-`Dominus Ultra` is an educational Triton implementation of causal attention with fused Rotary Positional Embeddings (RoPE) and Grouped Query Attention (GQA) style head mapping.
+**Educational Triton attention-kernel project with fused RoPE and GQA-style head mapping.**
 
-This repository is a **reference / learning project**, not a production benchmark suite. The current focus is correctness, readable Triton structure, and a small test harness that compares against PyTorch SDPA.
+Dominus Ultra is a learning and portfolio repo for GPU-kernel experimentation. It explores causal attention, Rotary Position Embeddings (RoPE), grouped-query attention concepts, and correctness-first comparison against PyTorch reference behavior.
 
-## What the code does today
+This repository is intentionally framed as an **experimental reference project**, not a production benchmark suite.
 
-- Fused RoPE application for Q and K inside the Triton attention kernels
-- Causal attention for prefill
-- A decode path for a single new token against a KV cache
-- Grouped Query Attention (GQA / MQA) style mapping from query heads to KV heads
-- bf16 / fp16-friendly implementation using Triton + PyTorch
+---
 
-## What this repository does **not** currently claim
+## What it does today
 
-To keep the project honest and reproducible, this repo does **not** currently claim:
+- Implements a Triton-based causal attention path.
+- Applies RoPE to query/key tensors inside the attention workflow.
+- Supports GQA/MQA-style mapping from query heads to KV heads.
+- Includes a decode-style path for a single new token against a KV cache.
+- Provides a small correctness check against PyTorch-style reference logic.
+- Demonstrates practical GPU-kernel reading, writing, and documentation work.
 
-- FP8 support
+---
+
+## What it does not claim yet
+
+To keep the project honest and recruiter-safe, this repo does **not** currently claim:
+
+- production readiness
 - Hopper TMA acceleration
-- bit-perfect equivalence across all hardware
-- production-readiness
+- verified FP8 support
+- bit-perfect equivalence across all GPU generations
+- superior performance over FlashAttention
 - unverified throughput numbers
 
-Those items should only be added back once they are implemented and measured with reproducible scripts.
+Those claims should only be added if the implementation, tests, and reproducible benchmark logs support them.
+
+---
+
+## Why this repo matters
+
+GPU kernels are hard to understand from blog posts alone. Dominus Ultra is a hands-on attempt to learn and document the moving parts:
+
+```text
+Q/K/V tensors
+  ↓
+RoPE rotation
+  ↓
+causal masking
+  ↓
+online softmax attention
+  ↓
+GQA/MQA head mapping
+  ↓
+output tensor
+```
+
+The value is in the engineering process: correctness first, readable code, then measured tuning.
+
+---
 
 ## Requirements
 
-- NVIDIA GPU
-- CUDA-enabled PyTorch
 - Python 3.10+
-- `torch`
-- `triton`
+- NVIDIA GPU
+- CUDA-capable PyTorch
+- Triton
 
 Example install:
 
@@ -40,12 +71,9 @@ cd DominusUltra
 pip install torch triton
 ```
 
-## Files
+---
 
-- `dominus_ultra.py` — main Triton implementation and a small correctness check
-- `README.md` — project overview
-
-## Usage
+## Usage example
 
 ```python
 import torch
@@ -65,27 +93,100 @@ v = torch.randn(B, Hk, T, D, device=device, dtype=dtype)
 
 cos, sin = precompute_rope_cos_sin(T, D, device=device, dtype=dtype)
 out, lse = dominus_ultra_prefill(q, k, v, cos, sin, num_kv_heads=Hk)
+
 print(out.shape, lse.shape)
 ```
 
-## Correctness first
+---
 
-The `__main__` block in `dominus_ultra.py` includes a simple reference comparison against PyTorch's `scaled_dot_product_attention` after manually applying RoPE.
+## Correctness-first workflow
 
-Before making any performance claims, this project should:
+Before making performance claims, run correctness checks on real hardware and record the exact setup.
 
-1. pass the correctness test reliably on real hardware
-2. add reproducible benchmark scripts
-3. compare against PyTorch SDPA and/or FlashAttention under clearly stated settings
+Suggested validation path:
 
-## Notes
+1. Run the included reference comparison.
+2. Confirm output shape and max error against a PyTorch reference.
+3. Test multiple tensor shapes.
+4. Test both bf16 and fp16 where supported.
+5. Add a benchmark script with clear hardware details.
+6. Compare against PyTorch SDPA or FlashAttention under stated settings.
 
-This code is meant to be useful to people learning Triton attention kernels. It may still need additional fixes, tuning, and broader test coverage for different shapes and GPU generations.
+---
+
+## Recommended benchmark documentation
+
+When benchmark results are added, include:
+
+- GPU model
+- CUDA version
+- PyTorch version
+- Triton version
+- tensor shapes
+- dtype
+- warmup iterations
+- measured iterations
+- baseline used
+- max error / tolerance
+
+This keeps the repo credible with engineers who know GPU performance.
+
+---
+
+## Files
+
+- `dominus_ultra.py` — main Triton implementation and correctness check
+- `README.md` — project overview and usage notes
+
+---
+
+## What I built / modified
+
+This repository demonstrates:
+
+- Triton kernel experimentation
+- attention-mechanism implementation work
+- RoPE and GQA concepts
+- correctness comparison against a reference
+- GPU-performance documentation discipline
+- willingness to revise claims based on code reality
+
+---
+
+## Recruiter notes
+
+Dominus Ultra is most relevant for roles involving:
+
+- AI systems engineering
+- GPU-kernel learning
+- LLM inference optimization
+- PyTorch/Triton experimentation
+- performance testing and benchmark hygiene
+
+It should be read as a learning project with real technical ambition, not as a finished production kernel.
+
+---
+
+## Roadmap
+
+- [ ] Add standalone test file
+- [ ] Add reproducible benchmark script
+- [ ] Expand shape coverage
+- [ ] Add CI syntax checks where GPU is not required
+- [ ] Add hardware-specific benchmark logs
+- [ ] Improve comments inside the Triton kernel
+- [ ] Compare against PyTorch SDPA under clear settings
+
+---
+
+## Built by
+
+**Lyle Perrien II**  
+Founder, **Michigan MindMend Inc.**  
+Owosso, Michigan
+
+Building privacy-first AI tools and learning the systems layer behind modern LLMs.
 
 ## License
 
 MIT
-
----
-
-Built by Michigan MindMend Inc.

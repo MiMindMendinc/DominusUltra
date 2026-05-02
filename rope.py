@@ -1,19 +1,7 @@
-Triton RoPE Kernel - 2026 Elite Edition
+"""Triton RoPE Kernel.
 
 Standalone Triton implementation of Rotary Position Embedding (RoPE) for Q/K in transformers.
-Optimized for performance, memory efficiency, and extensibility. Now with Hopper TMA support and dynamic theta computation.
-
-Key Features:
-- Autotuned kernel with expanded configs for all scales
-- In-place operations to minimize memory allocation
-- NTK-aware scaling support (for YaRN/dynamic NTK)
-- Backward pass for gradient computation
-- Hopper TMA acceleration for cos_sin loads on sm_90+
-- Dynamic theta computation inside kernel for flexibility
-- Production-ready with comprehensive benchmarking and numerical gradient checks
-
-Requirements: torch>=2.4, triton>=3.0, CUDA sm_80+ (Ampere+)
-For Hopper (sm_90+): Automatic TMA usage for ~10-20% bandwidth boost on cos_sin loads.
+"""
 
 import torch
 import triton

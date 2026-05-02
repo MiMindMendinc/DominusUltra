@@ -47,6 +47,18 @@ pip install torch triton
 
 ## Usage
 
+CLI sanity check (no CUDA required):
+
+```bash
+python -m dominus_ultra --help
+```
+
+Run the included self-test (requires CUDA + a working Triton driver):
+
+```bash
+python -m dominus_ultra --self-test
+```
+
 ```python
 import torch
 from dominus_ultra import (

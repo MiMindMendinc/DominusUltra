@@ -58,17 +58,18 @@ The value is in the engineering process: correctness first, readable code, then 
 
 ## Requirements
 
-- Python 3.10+
-- NVIDIA GPU
-- CUDA-capable PyTorch
-- Triton
+- Python 3.8+
+- NVIDIA GPU (Ampere / sm_80+ recommended for best performance)
+- CUDA-capable PyTorch ≥ 2.4
+- Triton ≥ 3.0
 
 Example install:
 
 ```bash
 git clone https://github.com/MiMindMendinc/DominusUltra.git
 cd DominusUltra
-pip install torch triton
+pip install -r requirements.txt
+pip install -e .
 ```
 
 ---

@@ -341,10 +341,33 @@ def dominus_ultra_decode(
 
     return out.unsqueeze(2)
 
-# Quick correctness test (run the file)
-if __name__ == "__main__":
+def _main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="dominus_ultra",
+        description=(
+            "Triton attention kernels (prefill/decode) with RoPE helpers. "
+            "This module requires a working CUDA/Triton runtime to execute kernels."
+        ),
+    )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run a small correctness test (requires CUDA).",
+    )
+
+    args = parser.parse_args()
+
+    if not args.self_test:
+        parser.print_help()
+        return 0
+
+    if not torch.cuda.is_available():
+        raise SystemExit("--self-test requires CUDA (torch.cuda.is_available() is false)")
+
     torch.manual_seed(42)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda"
     dtype = torch.bfloat16
 
     B, Hq, Hk, T, D = 1, 8, 8, 128, 64
@@ -355,20 +378,25 @@ if __name__ == "__main__":
 
     cos, sin = precompute_rope_cos_sin(T, D, device, dtype)
 
-    out_triton, lse_triton = dominus_ultra_prefill(q, k, v, cos, sin, Hk)
+    out_triton, _lse_triton = dominus_ultra_prefill(q, k, v, cos, sin, Hk)
 
     # Reference torch.sdpa (no RoPE pre-applied — manual RoPE for fair comparison)
     def apply_rope(x, cos, sin):
-        x1 = x[..., :D//2]
-        x2 = x[..., D//2:]
+        x1 = x[..., : D // 2]
+        x2 = x[..., D // 2 :]
         return torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
 
     q_ref = apply_rope(q.to(torch.float32), cos, sin)
     k_ref = apply_rope(k.to(torch.float32), cos, sin)
-    out_ref = torch.nn.functional.scaled_dot_product_attention(q_ref, k_ref, v.to(torch.float32), is_causal=True)
+    out_ref = torch.nn.functional.scaled_dot_product_attention(
+        q_ref, k_ref, v.to(torch.float32), is_causal=True
+    )
 
     diff = (out_triton.to(torch.float32) - out_ref).abs().max().item()
     print(f"Max abs diff vs torch.sdpa (manual RoPE): {diff:.6f}")
     print("Test passed if diff < 1e-3 (bf16 tolerance)")
+    return 0
 
-    print("Dominus Ultra ready. ❤️🚀")
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

@@ -115,6 +115,7 @@ DominusUltra/
 - `test_dominus.py`: the correctness contract and supported shapes.
 - `benchmark.py`: the performance story and repeatable measurement path.
 - `examples/webgpu-rope-demo.html`: browser-side RoPE visualization/demo material.
+- [Architecture brief](docs/ARCHITECTURE.md): a guided walkthrough of the kernel design and validation loop.
 
 ## Roadmap
 

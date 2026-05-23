@@ -93,6 +93,18 @@ python benchmark.py --mode decode --dtype float16
 
 The benchmark prints Triton latency, PyTorch reference latency, and speedup for MHA and GQA configurations. When sharing results, include GPU model, CUDA version, PyTorch version, Triton version, dtype, and command used.
 
+## Record A Live Speed Test
+
+For a screen-recorded demo, use the live speed-test runner:
+
+```bash
+python demo_speedtest.py --seq-len 1024 --iterations 40
+```
+
+It prints hardware metadata, runs warmups, shows live progress bars, compares DominusUltra against the PyTorch reference path, checks numerical error, and writes a shareable report to `benchmark_results/`.
+
+See [docs/RECORDING_GUIDE.md](docs/RECORDING_GUIDE.md) for a short script and recording commands.
+
 ## Project Layout
 
 ```text
@@ -101,7 +113,9 @@ DominusUltra/
   rope.py                       # RoPE-focused helper/reference work
   test_dominus.py               # CUDA correctness tests
   benchmark.py                  # Performance harness
+  demo_speedtest.py             # Recordable live benchmark demo
   examples/webgpu-rope-demo.html
+  docs/                         # Architecture and recording notes
   setup.py
   requirements.txt
   CONTRIBUTING.md

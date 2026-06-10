@@ -10,6 +10,8 @@ Fast Triton causal-attention kernels with fused RoPE, GQA/MQA support, and decod
 
 DominusUltra is a single-file, readable Triton implementation of causal attention for modern decoder-only LLM workloads. It focuses on the pieces that matter in real inference systems: rotary position embeddings, grouped-query attention, numerically stable causal masking, and separate prefill/decode paths.
 
+A fused-RoPE optimization based on this work was submitted upstream to xai-org/grok-1 as [PR #434](https://github.com/xai-org/grok-1/pull/434).
+
 > Status: alpha research kernel. The code is meant to be studied, benchmarked, and extended on CUDA GPUs, especially NVIDIA Ampere or newer.
 
 ## Why It Matters
@@ -33,6 +35,22 @@ This repository is useful if you want to:
 | Correctness | PyTorch reference comparisons in `test_dominus.py` |
 | Benchmarking | Reproducible benchmark harness in `benchmark.py` |
 | Packaging | Editable install via `setup.py` and `requirements.txt` |
+
+## Measured results
+
+All numbers from the in-repo harness (`benchmark.py`), correctness gated by `torch.allclose` against the PyTorch reference before any timing.
+
+| Config | Hardware | Result |
+| --- | --- | --- |
+| Fused RoPE, seq_len 2048 | RTX PRO 6000 (Blackwell) | up to 7× vs PyTorch reference, ~1.8 TB/s effective bandwidth |
+
+Results vary with GPU architecture, sequence length, and head configuration. CUDA GPU required, Ampere or newer recommended. Reproduce with:
+
+```bash
+python benchmark.py
+```
+
+No comparison against other fused-attention libraries is claimed; the baseline is the unfused PyTorch reference implementation in this repo.
 
 ## Installation
 
@@ -137,7 +155,7 @@ DominusUltra/
 - [x] GQA/MQA KV head sharing
 - [x] Decode path with KV cache
 - [x] Benchmark harness
-- [ ] Publish benchmark table with GPU-specific results
+- [x] Publish benchmark table with GPU-specific results
 - [ ] Add FlashAttention-style tiling experiments
 - [ ] Add FP8/INT8 experimentation branch
 - [ ] Expand WebGPU/browser demo work

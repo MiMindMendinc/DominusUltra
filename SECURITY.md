@@ -6,7 +6,7 @@ We take the security of `Dominus Ultra` seriously. If you discover a security vu
 
 **Please DO NOT open a public GitHub issue for security vulnerabilities.** Public disclosure can put the entire community at risk.
 
-Instead, please report vulnerabilities by sending an email to [INSERT SECURITY CONTACT EMAIL HERE, e.g., security@mimindmend.com].
+Instead, please report vulnerabilities privately through GitHub's [private vulnerability reporting](https://github.com/MiMindMendinc/DominusUltra/security/advisories/new) ("Report a vulnerability" under the repository's **Security** tab).
 
 In your report, please include:
 

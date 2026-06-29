@@ -58,15 +58,23 @@ No comparison against other fused-attention libraries is claimed; the baseline i
 git clone https://github.com/MiMindMendinc/DominusUltra.git
 cd DominusUltra
 python -m venv .venv
-.\.venv\Scripts\activate
-pip install --upgrade pip
-pip install -e ".[dev]"
 ```
 
-Linux/macOS activation:
+Activate the virtual environment:
 
 ```bash
+# Linux/macOS
 source .venv/bin/activate
+
+# Windows (PowerShell)
+.\.venv\Scripts\activate
+```
+
+Then install:
+
+```bash
+pip install --upgrade pip
+pip install -e ".[dev]"
 ```
 
 ## Quick Start

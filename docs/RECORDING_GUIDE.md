@@ -19,7 +19,7 @@ Short version:
 Windows:
 
 ```bash
-cd C:\Users\petep\OneDrive\mindmend_v9.py\DominusUltra
+cd path\to\DominusUltra
 .\.venv\Scripts\activate
 python demo_speedtest.py --seq-len 1024 --iterations 40
 ```

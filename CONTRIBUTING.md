@@ -50,7 +50,7 @@ We welcome suggestions for new features or improvements. Please open an issue to
 
 -   **Python**: Adhere to PEP 8. Use `black` for formatting and `flake8` for linting.
 -   **Triton**: Follow Triton best practices for kernel development, focusing on memory efficiency, parallelism, and avoiding bank conflicts.
--   **Documentation**: Ensure all new code is well-commented. Update `README.md` or `whitepaper.md` if your changes introduce new features or modify existing behavior.
+-   **Documentation**: Ensure all new code is well-commented. Update `README.md` or the relevant files under `docs/` if your changes introduce new features or modify existing behavior.
 -   **Testing**: Write unit tests for new functionalities. We use `pytest`.
 
 ## Code of Conduct

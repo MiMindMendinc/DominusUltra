@@ -251,8 +251,8 @@ class TestRoPEFunction:
         
         for dtype in [torch.float32, torch.bfloat16, torch.float16]:
             cos, sin = precompute_rope_cos_sin(max_seq_len, dim, device, dtype)
-            assert cos.dtype == dtype, f"Cos dtype mismatch"
-            assert sin.dtype == dtype, f"Sin dtype mismatch"
+            assert cos.dtype == dtype, "Cos dtype mismatch"
+            assert sin.dtype == dtype, "Sin dtype mismatch"
     
     def test_rope_values_range(self, device):
         """Test RoPE values are in valid range [-1, 1]."""

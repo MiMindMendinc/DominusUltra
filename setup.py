@@ -1,6 +1,6 @@
 """Setup script for Dominus Ultra package."""
 
-from setuptools import setup, find_packages
+from setuptools import setup
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
@@ -33,8 +33,10 @@ setup(
     install_requires=requirements,
     extras_require={
         "dev": [
-            "pytest>=7.0",
-            "pytest-cov",
+        "pytest>=7.0",
+        "pytest-cov",
+        "ruff>=0.9",
+        "mypy>=1.8",
         ],
     },
 )

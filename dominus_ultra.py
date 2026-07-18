@@ -15,8 +15,8 @@ Supports:
 Requirements: torch>=2.4, triton>=3.0, CUDA sm_80+ (Ampere+)
 """
 
-import triton
-import triton.language as tl
+import triton  # type: ignore[import-untyped]
+import triton.language as tl  # type: ignore[import-untyped]
 import torch
 from typing import Optional, Tuple
 
@@ -278,7 +278,8 @@ def dominus_ultra_prefill(
 
     scale = 1.0 / (D ** 0.5)
 
-    grid = lambda meta: (triton.cdiv(T, meta['BLOCK_M']), B * Hq)
+    def grid(meta):
+        return (triton.cdiv(T, meta['BLOCK_M']), B * Hq)
 
     prefill_kernel[grid](
         q, k, v, cos, sin, out, lse,

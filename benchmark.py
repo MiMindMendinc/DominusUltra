@@ -8,7 +8,7 @@ across various configurations, measuring throughput and memory usage.
 import torch
 import torch.nn.functional as F
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional
 import argparse
 
 from dominus_ultra import (
@@ -41,7 +41,7 @@ def benchmark_function(func, *args, warmup=5, iterations=100):
     times = []
     for _ in range(iterations):
         start = time.perf_counter()
-        result = func(*args)
+        func(*args)
         torch.cuda.synchronize()
         end = time.perf_counter()
         times.append((end - start) * 1000)  # Convert to ms
@@ -66,7 +66,7 @@ def benchmark_prefill(
     num_heads: int,
     seq_len: int,
     head_dim: int,
-    num_kv_heads: int = None,
+    num_kv_heads: Optional[int] = None,
     dtype=torch.bfloat16,
     device="cuda",
 ):
@@ -138,7 +138,7 @@ def benchmark_decode(
     num_heads: int,
     past_len: int,
     head_dim: int,
-    num_kv_heads: int = None,
+    num_kv_heads: Optional[int] = None,
     dtype=torch.bfloat16,
     device="cuda",
 ):

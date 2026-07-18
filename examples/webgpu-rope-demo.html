@@ -17,7 +17,7 @@
 </head>
 <body>
   <h1>🌌 Dominus Ultra WebGPU v2</h1>
-  <p style="color:#888;">MindMend • Multi-head • Precomputed freqs • Buffer reuse • Built for Michigan Families ❤️</p>
+  <p style="color:#888;">MindMend • Multi-head • Precomputed frequencies • Buffer reuse</p>
   
   <div class="container">
     <label>Head dim (even): <input id="dim" type="number" value="128" style="width:80px;"></label><br><br>
@@ -39,8 +39,8 @@
   </div>
 
   <p style="color:#555; margin-top:40px;">
-    Part of <a href="https://github.com/MiMindMendinc/DominusUltra" style="color:#0ff;">Dominus Ultra</a> — privacy-first AI for youth mental health in Michigan.<br>
-    Zero data leaves your device. Built with ❤️ in Owosso by @p_perrien
+    Part of <a href="https://github.com/MiMindMendinc/DominusUltra" style="color:#0ff;">DominusUltra</a>.<br>
+    The demo runs locally in your browser; input arrays are not uploaded by this page.
   </p>
 
 <script>
@@ -144,7 +144,37 @@ async function runRoPE() {
   } catch(e){ status.textContent = '❌ '+e.message; }
 }
 
-function runCPUBench(){ /* same simple CPU benchmark as before */ }
+function runCPUBench(){
+  const status = document.getElementById('status');
+  const d = Number.parseInt(document.getElementById('dim').value, 10);
+  const n = Number.parseInt(document.getElementById('tokens').value, 10);
+  const H = Number.parseInt(document.getElementById('heads').value, 10);
+  if (!Number.isInteger(d) || d <= 0 || d % 2 !== 0 || !Number.isInteger(n) || n <= 0 || !Number.isInteger(H) || H <= 0) {
+    status.textContent = '❌ Enter a positive even head dimension and positive token/head counts.';
+    return;
+  }
+
+  const values = new Float32Array(n * H * d);
+  for (let i = 0; i < values.length; i++) values[i] = Math.sin(i * 0.01);
+  const half = d / 2;
+  const start = performance.now();
+  for (let head = 0; head < H; head++) {
+    for (let token = 0; token < n; token++) {
+      const offset = (head * n + token) * d;
+      for (let i = 0; i < half; i++) {
+        const angle = token * Math.pow(10000, -i / half);
+        const c = Math.cos(angle);
+        const s = Math.sin(angle);
+        const a = values[offset + (2 * i)];
+        const b = values[offset + (2 * i) + 1];
+        values[offset + (2 * i)] = a * c - b * s;
+        values[offset + (2 * i) + 1] = a * s + b * c;
+      }
+    }
+  }
+  const elapsed = performance.now() - start;
+  status.textContent = `✅ CPU reference rotated ${n * H} token-heads in ${elapsed.toFixed(1)} ms`;
+}
 </script>
 </body>
 </html>

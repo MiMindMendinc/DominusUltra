@@ -31,5 +31,14 @@ jobs:
       - name: Import package
         run: python -c "import dominus_ultra; print('DominusUltra import OK')"
 
+      - name: Lint
+        run: ruff check .
+
+      - name: Type check
+        run: mypy dominus_ultra.py rope.py benchmark.py demo_speedtest.py
+
+      - name: Compile Python sources
+        run: python -m compileall -q dominus_ultra.py rope.py benchmark.py demo_speedtest.py
+
       - name: Run tests
         run: pytest -q

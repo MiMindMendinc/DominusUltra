@@ -1,6 +1,6 @@
 # DominusUltra
 
-Fast Triton causal-attention kernels with fused RoPE, GQA/MQA support, and decode-time KV-cache paths for LLM inference experiments.
+DominusUltra is a Triton CUDA research kernel for fused-RoPE causal attention and GQA/MQA, with **142 parametrized CUDA correctness cases** collected by `pytest`.
 
 [![CI](https://github.com/MiMindMendinc/DominusUltra/actions/workflows/ci.yml/badge.svg)](https://github.com/MiMindMendinc/DominusUltra/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -8,51 +8,29 @@ Fast Triton causal-attention kernels with fused RoPE, GQA/MQA support, and decod
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.4%2B-ee4c2c.svg)](requirements.txt)
 [![Triton](https://img.shields.io/badge/Triton-3.0%2B-111111.svg)](requirements.txt)
 
-DominusUltra is a single-file, readable Triton implementation of causal attention for modern decoder-only LLM workloads. It focuses on the pieces that matter in real inference systems: rotary position embeddings, grouped-query attention, numerically stable causal masking, and separate prefill/decode paths.
+## Why it matters
 
-A fused-RoPE optimization based on this work was submitted upstream to xai-org/grok-1 as [PR #434](https://github.com/xai-org/grok-1/pull/434).
+Production attention libraries are intentionally opaque at the kernel boundary. This repository keeps prefill, decode, rotary embeddings, grouped-query head mapping, and the PyTorch reference close enough to read together. It is intended for correctness work and controlled CUDA experiments, not as a drop-in replacement for a production attention library.
 
-> Status: alpha research kernel. The code is meant to be studied, benchmarked, and extended on CUDA GPUs, especially NVIDIA Ampere or newer.
+## Benchmarks
 
-## Why It Matters
-
-Most LLM projects call optimized attention as a black box. DominusUltra opens that box. It shows how attention kernels are built from the inside: tiling, online softmax, RoPE fusion, GQA head mapping, and KV-cache decode behavior.
-
-This repository is useful if you want to:
-
-- Learn how Triton attention kernels are structured.
-- Compare a fused RoPE attention path against PyTorch reference behavior.
-- Experiment with GQA/MQA layouts used by modern LLMs.
-- Build a portfolio artifact for LLM inference, GPU programming, or systems AI roles.
-
-## Features
-
-| Area | What is included |
-| --- | --- |
-| Prefill | Fused causal attention kernel with RoPE applied inside the Triton path |
-| Decode | Single-token decode path with KV-cache inputs |
-| Attention layouts | MHA, GQA, and MQA-style KV head sharing |
-| Correctness | PyTorch reference comparisons in `test_dominus.py` |
-| Benchmarking | Reproducible benchmark harness in `benchmark.py` |
-| Packaging | Editable install via `setup.py` and `requirements.txt` |
-
-## Measured results
-
-All numbers from the in-repo harness (`benchmark.py`), correctness gated by `torch.allclose` against the PyTorch reference before any timing.
-
-| Config | Hardware | Result |
-| --- | --- | --- |
-| Fused RoPE, seq_len 2048 | RTX PRO 6000 (Blackwell) | up to 7× vs PyTorch reference, ~1.8 TB/s effective bandwidth |
-
-Results vary with GPU architecture, sequence length, and head configuration. CUDA GPU required, Ampere or newer recommended. Reproduce with:
+`benchmark.py` compares the Triton path with this repository's unfused PyTorch reference: RoPE is applied in PyTorch, then `torch.nn.functional.scaled_dot_product_attention` runs on the same tensor shapes. The default prefill sweep uses batch size 2, 32 query/KV heads, head dimension 64, sequence lengths 128–2048, and `bfloat16`; it also measures GQA at sequence length 1024. The decode sweep uses batch size 8, 32 heads, head dimension 64, and cache lengths 128–2048.
 
 ```bash
-python benchmark.py
+python benchmark.py --mode all --dtype bfloat16
 ```
 
-No comparison against other fused-attention libraries is claimed; the baseline is the unfused PyTorch reference implementation in this repo.
+The harness prints CUDA, PyTorch, dtype, latency, and speedup context. No reviewer-ready performance result is currently committed: the earlier `7x` / `~1.8 TB/s` row was removed because no raw result accompanied it and this harness does not calculate effective bandwidth. Commit the raw output, GPU model, driver/runtime, PyTorch version, Triton version, dtype, and exact command before quoting a number.
 
-## Installation
+For a report-producing run:
+
+```bash
+python demo_speedtest.py --seq-len 2048 --dtype bfloat16 --iterations 40
+```
+
+This writes Markdown and JSON under `benchmark_results/` after checking numerical error. CUDA is required; the command exits with status 2 when no NVIDIA CUDA device is available.
+
+## Install and quickstart
 
 ```bash
 git clone https://github.com/MiMindMendinc/DominusUltra.git
@@ -60,24 +38,24 @@ cd DominusUltra
 python -m venv .venv
 ```
 
-Activate the virtual environment:
+Activate the environment:
 
 ```bash
 # Linux/macOS
 source .venv/bin/activate
 
-# Windows (PowerShell)
+# Windows PowerShell
 .\.venv\Scripts\activate
 ```
 
-Then install:
+Install the package and development dependencies:
 
 ```bash
-pip install --upgrade pip
+python -m pip install --upgrade pip
 pip install -e ".[dev]"
 ```
 
-## Quick Start
+Run a minimal prefill call on a CUDA GPU:
 
 ```python
 import torch
@@ -90,90 +68,48 @@ v = torch.randn(1, 8, 512, 64, device="cuda", dtype=torch.bfloat16)
 cos, sin = precompute_rope_cos_sin(512, 64, device="cuda", dtype=torch.bfloat16)
 out, lse = dominus_ultra_prefill(q, k, v, cos, sin, num_kv_heads=8)
 
-print(out.shape)
-print(lse.shape)
+print(out.shape)  # torch.Size([1, 8, 512, 64])
+print(lse.shape)  # torch.Size([1, 8, 512])
 ```
 
-## Validate Correctness
+Requirements: Python 3.8+, PyTorch 2.4+, Triton 3.0+, and an NVIDIA CUDA GPU. Ampere or newer is recommended for the included kernel configurations.
 
-The pytest suite compares Triton outputs with PyTorch reference implementations across prefill, decode, GQA, shape validation, and numerical stability cases.
+## Test suite
 
 ```bash
 pytest -q
 ```
 
-CUDA is required for the kernel tests. On CPU-only machines the tests are skipped instead of producing false failures.
+`pytest` collects **142 cases** covering prefill, decode, GQA/MQA head layouts, output shape and dtype, RoPE ranges, numerical stability, and edge shapes. Every case requires CUDA. A CPU-only run therefore reports `142 skipped`; that is an environment limitation, not passing GPU evidence. A reviewer-ready release still needs a recorded CUDA run with the device and dependency versions.
 
-## Run Benchmarks
-
-```bash
-python benchmark.py --mode all --dtype bfloat16
-```
-
-Useful targeted runs:
+Static verification used during review:
 
 ```bash
-python benchmark.py --mode prefill --dtype bfloat16
-python benchmark.py --mode decode --dtype float16
+ruff check .
+mypy dominus_ultra.py rope.py benchmark.py demo_speedtest.py
+python -m compileall -q dominus_ultra.py rope.py benchmark.py demo_speedtest.py
 ```
 
-The benchmark prints Triton latency, PyTorch reference latency, and speedup for MHA and GQA configurations. When sharing results, include GPU model, CUDA version, PyTorch version, Triton version, dtype, and command used.
+## Architecture
 
-## Record A Live Speed Test
+- `dominus_ultra.py` contains the fused-RoPE prefill kernel, decode kernel, and Python launch wrappers.
+- `test_dominus.py` defines the PyTorch-reference correctness contract.
+- `benchmark.py` runs synchronized latency comparisons for MHA and GQA shapes.
+- `demo_speedtest.py` records hardware metadata, latency, speedup, and maximum numerical error.
+- `rope.py` contains the standalone forward/backward RoPE experiment.
+- `examples/webgpu-rope-demo.html` provides a browser-side RoPE visualization and CPU reference timing.
 
-For a screen-recorded demo, use the live speed-test runner:
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the tiled prefill/decode data flow and [docs/RECORDING_GUIDE.md](docs/RECORDING_GUIDE.md) for benchmark capture guidance.
 
-```bash
-python demo_speedtest.py --seq-len 1024 --iterations 40
-```
+## Correctness and limitations
 
-It prints hardware metadata, runs warmups, shows live progress bars, compares DominusUltra against the PyTorch reference path, checks numerical error, and writes a shareable report to `benchmark_results/`.
+- The CUDA tests compare outputs with a readable PyTorch reference using dtype-aware tolerances.
+- The benchmark baseline is this repository's PyTorch reference, not FlashAttention or another fused library.
+- The kernels are research code and have not received an independent security or production-readiness audit.
+- Performance depends on GPU architecture, driver/runtime, dtype, shape, and installed PyTorch/Triton versions.
 
-See [docs/RECORDING_GUIDE.md](docs/RECORDING_GUIDE.md) for a short script and recording commands.
+A fused-RoPE experiment related to this work was submitted to `xai-org/grok-1` as [PR #434](https://github.com/xai-org/grok-1/pull/434). That pull request is separate from this repository's correctness and benchmark evidence.
 
-## Project Layout
+## License
 
-```text
-DominusUltra/
-  dominus_ultra.py              # Main Triton kernels and Python wrappers
-  rope.py                       # RoPE-focused helper/reference work
-  test_dominus.py               # CUDA correctness tests
-  benchmark.py                  # Performance harness
-  demo_speedtest.py             # Recordable live benchmark demo
-  examples/webgpu-rope-demo.html
-  docs/                         # Architecture and recording notes
-  setup.py
-  requirements.txt
-  CONTRIBUTING.md
-  SECURITY.md
-  CODE_OF_CONDUCT.md
-```
-
-## What To Look At First
-
-- `dominus_ultra.py`: the core kernel implementation.
-- `test_dominus.py`: the correctness contract and supported shapes.
-- `benchmark.py`: the performance story and repeatable measurement path.
-- `examples/webgpu-rope-demo.html`: browser-side RoPE visualization/demo material.
-- [Architecture brief](docs/ARCHITECTURE.md): a guided walkthrough of the kernel design and validation loop.
-
-## Roadmap
-
-- [x] Fused RoPE prefill kernel
-- [x] GQA/MQA KV head sharing
-- [x] Decode path with KV cache
-- [x] Benchmark harness
-- [x] Publish benchmark table with GPU-specific results
-- [ ] Add FlashAttention-style tiling experiments
-- [ ] Add FP8/INT8 experimentation branch
-- [ ] Expand WebGPU/browser demo work
-
-## Contributing
-
-Contributions are welcome, especially benchmark results, correctness tests, documentation improvements, and kernel experiments. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
-
-## Author
-
-Built by Lyle Perrien / MiMindMend Inc. as part of a broader private, high-performance AI inference stack.
-
-MIT License. See [LICENSE](LICENSE).
+[MIT](LICENSE). See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project policies.

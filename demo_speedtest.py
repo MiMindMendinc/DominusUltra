@@ -21,7 +21,7 @@ import torch
 import torch.nn.functional as F
 
 try:
-    import triton
+    import triton  # type: ignore[import-untyped]
 except Exception:  # pragma: no cover - optional metadata only
     triton = None
 

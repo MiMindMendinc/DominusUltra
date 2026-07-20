@@ -4,10 +4,9 @@ Standalone Triton implementation of Rotary Position Embedding (RoPE) for Q/K in 
 """
 
 import torch
-import triton
-import triton.language as tl
+import triton  # type: ignore[import-untyped]
+import triton.language as tl  # type: ignore[import-untyped]
 import time
-import math
 from typing import Optional
 
 @triton.autotune(
@@ -169,7 +168,8 @@ def apply_rope(q: torch.Tensor, k: torch.Tensor,
         out_q = torch.empty_like(q)
     if out_k is None:
         out_k = torch.empty_like(k)
-    grid = lambda meta: (bs, heads, triton.cdiv(seq_len, meta['BLOCK_M']))
+    def grid(meta):
+        return (bs, heads, triton.cdiv(seq_len, meta['BLOCK_M']))
     rope_kernel[grid](
         q, k, out_q, out_k,
         seq_len, head_dim, base, scale_factor,
@@ -189,7 +189,8 @@ def apply_rope_backward(grad_out_q: torch.Tensor, grad_out_k: torch.Tensor,
         grad_q = torch.empty_like(grad_out_q)
     if grad_k is None:
         grad_k = torch.empty_like(grad_out_k)
-    grid = lambda meta: (bs, heads, triton.cdiv(seq_len, meta['BLOCK_M']))
+    def grid(meta):
+        return (bs, heads, triton.cdiv(seq_len, meta['BLOCK_M']))
     rope_backward_kernel[grid](
         grad_out_q, grad_out_k, grad_q, grad_k,
         seq_len, head_dim, base, scale_factor,
@@ -259,6 +260,7 @@ if __name__ == '__main__':
         for _ in range(30):
             d_half = head_dim // 2
             q1, q2 = q[..., :d_half], q[..., d_half:]
+            k1, k2 = k[..., :d_half], k[..., d_half:]
             # Simulate PyTorch RoPE for comparison (using dynamic theta equivalent)
             theta = 10000.0 ** (-torch.arange(0, head_dim, 2, device='cuda', dtype=torch.float32) / head_dim)
             positions = torch.arange(seq_len, device='cuda', dtype=torch.float32).unsqueeze(1)
@@ -307,5 +309,5 @@ if __name__ == '__main__':
         print(f"bs={bs} heads={heads} seq={seq_len} d={head_dim}")
         print(f"PyTorch: {pytorch_time:6.2f} ms | {pytorch_tps:5.1f} M tok/s")
         print(f"Triton: {triton_time:6.2f} ms | {triton_tps:5.1f} M tok/s")
-        print(f"Speedup: {pytorch_tps / triton_tps:.2f}×")
+        print(f"Speedup: {triton_tps / pytorch_tps:.2f}×")
         print()

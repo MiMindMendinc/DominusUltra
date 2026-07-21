@@ -22,6 +22,8 @@ python benchmark.py --mode all --dtype bfloat16
 
 The harness prints CUDA, PyTorch, dtype, latency, and speedup context. No reviewer-ready performance result is currently committed: the earlier `7x` / `~1.8 TB/s` row was removed because no raw result accompanied it and this harness does not calculate effective bandwidth. Commit the raw output, GPU model, driver/runtime, PyTorch version, Triton version, dtype, and exact command before quoting a number.
 
+A preliminary [operator-supplied Colab CUDA verification capture](docs/evidence/COLAB_T4_ROPE_8192.md) is preserved with its exact visible numbers and limitations. It reports a passing 8,192-position comparison with maximum absolute difference 0.0, but it is not promoted as reviewer-complete benchmark evidence because the screenshot omits required environment metadata and raw output.
+
 For a report-producing run:
 
 ```bash

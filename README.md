@@ -1,12 +1,13 @@
 # DominusUltra
 
-DominusUltra is a Triton CUDA research kernel for fused-RoPE causal attention and GQA/MQA, with **142 parametrized CUDA correctness cases** collected by `pytest`.
+DominusUltra is a Triton CUDA research kernel for fused-RoPE causal attention and GQA/MQA. The repository includes a **142-case CUDA correctness matrix**, seven CPU RoPE contract cases, and a report generator that refuses to label a GPU run successful unless every selected case passes its numerical gate.
 
 [![CI](https://github.com/MiMindMendinc/DominusUltra/actions/workflows/ci.yml/badge.svg)](https://github.com/MiMindMendinc/DominusUltra/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](setup.py)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.4%2B-ee4c2c.svg)](requirements.txt)
 [![Triton](https://img.shields.io/badge/Triton-3.0%2B-111111.svg)](requirements.txt)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MiMindMendinc/DominusUltra/blob/main/colab/DominusUltra_GPU_Evidence.ipynb)
 
 ## Why it matters
 
@@ -20,17 +21,25 @@ Production attention libraries are intentionally opaque at the kernel boundary. 
 python benchmark.py --mode all --dtype bfloat16
 ```
 
-The harness prints CUDA, PyTorch, dtype, latency, and speedup context. No reviewer-ready performance result is currently committed: the earlier `7x` / `~1.8 TB/s` row was removed because no raw result accompanied it and this harness does not calculate effective bandwidth. Commit the raw output, GPU model, driver/runtime, PyTorch version, Triton version, dtype, and exact command before quoting a number.
+No reviewer-ready fused-attention performance result is currently committed. The earlier `7x` / `~1.8 TB/s` row was removed because no raw result accompanied it and the repository does not calculate effective bandwidth. Do not quote a fused-attention speedup until an untouched correctness-gated report is attached to the repository.
 
-A preliminary [operator-supplied Colab CUDA verification capture](docs/evidence/COLAB_T4_ROPE_8192.md) is preserved with its exact visible numbers and limitations. It reports a passing 8,192-position comparison with maximum absolute difference 0.0, but it is not promoted as reviewer-complete benchmark evidence because the screenshot omits required environment metadata and raw output.
+A preliminary [operator-supplied Colab CUDA verification capture](docs/evidence/COLAB_T4_ROPE_8192.md) is preserved with its exact visible numbers and limitations. It covers a standalone RoPE experiment—not the fused prefill/decode kernel—and is not promoted as reviewer-complete evidence because the screenshot omits required environment metadata and raw output.
 
-For a report-producing run:
+For the release-gating quick matrix:
 
 ```bash
-python demo_speedtest.py --seq-len 2048 --dtype bfloat16 --iterations 40
+python gpu_evidence.py --suite quick --dtype auto --warmup 10 --iterations 50
 ```
 
-This writes Markdown and JSON under `benchmark_results/` after checking numerical error. CUDA is required; the command exits with status 2 when no NVIDIA CUDA device is available.
+For a broader matrix across both supported low-precision dtypes where the GPU supports them:
+
+```bash
+python gpu_evidence.py --suite full --dtype both --warmup 20 --iterations 100
+```
+
+The runner writes Markdown and raw JSON under `benchmark_results/`. It records the exact commit, source hashes, GPU/software stack, correctness error, LSE error, every CUDA-event sample, summary statistics, and a SHA-256 payload digest. It exits nonzero on compile errors, runtime failures, or tolerance failures. See the [evidence protocol](docs/EVIDENCE_PROTOCOL.md), or use the one-click Colab badge above and submit either a passing or failing report through the [benchmark issue template](https://github.com/MiMindMendinc/DominusUltra/issues/new?template=benchmark_result.md).
+
+`demo_speedtest.py` remains available for a recordable single-shape terminal demo, but its output is not the release gate.
 
 ## Install and quickstart
 
@@ -82,7 +91,7 @@ Requirements: Python 3.8+, PyTorch 2.4+, Triton 3.0+, and an NVIDIA CUDA GPU. Am
 pytest -q
 ```
 
-`pytest` collects **142 cases** covering prefill, decode, GQA/MQA head layouts, output shape and dtype, RoPE ranges, numerical stability, and edge shapes. Every case requires CUDA. A CPU-only run therefore reports `142 skipped`; that is an environment limitation, not passing GPU evidence. A reviewer-ready release still needs a recorded CUDA run with the device and dependency versions.
+`pytest` collects **142 CUDA cases** covering prefill, decode, GQA/MQA head layouts, output shape and dtype, RoPE ranges, numerical stability, and edge shapes, plus seven CPU cases for the RoPE table contract, standalone/fused consistency, and invalid inputs. A CPU-only run can validate those seven contracts but skips the fused kernels; that is not passing GPU evidence. A reviewer-ready release still needs an untouched `gpu_evidence.py` PASS report.
 
 Static verification used during review:
 
@@ -97,6 +106,7 @@ python -m compileall -q dominus_ultra.py rope.py benchmark.py demo_speedtest.py
 - `dominus_ultra.py` contains the fused-RoPE prefill kernel, decode kernel, and Python launch wrappers.
 - `test_dominus.py` defines the PyTorch-reference correctness contract.
 - `benchmark.py` runs synchronized latency comparisons for MHA and GQA shapes.
+- `gpu_evidence.py` runs the correctness-gated, metadata-complete public evidence matrix.
 - `demo_speedtest.py` records hardware metadata, latency, speedup, and maximum numerical error.
 - `rope.py` contains the standalone forward/backward RoPE experiment.
 - `examples/webgpu-rope-demo.html` provides a browser-side RoPE visualization and CPU reference timing.
@@ -106,6 +116,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the tiled prefill/decode da
 ## Correctness and limitations
 
 - The CUDA tests compare outputs with a readable PyTorch reference using dtype-aware tolerances.
+- Source-level repairs for the RoPE table shape, half-rotation indexing, decode reduction, KV tail masking, and online-softmax rescaling still require independent CUDA execution before issue [#4](https://github.com/MiMindMendinc/DominusUltra/issues/4) can close.
 - The benchmark baseline is this repository's PyTorch reference, not FlashAttention or another fused library.
 - The kernels are research code and have not received an independent security or production-readiness audit.
 - Performance depends on GPU architecture, driver/runtime, dtype, shape, and installed PyTorch/Triton versions.

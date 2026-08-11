@@ -82,7 +82,7 @@ flowchart LR
 
 ## Benchmarking Model
 
-`benchmark.py` compares DominusUltra against a PyTorch reference path using warmup iterations, CUDA synchronization, repeated timing, and matched tensor shapes.
+`benchmark.py` is an exploratory sweep. `gpu_evidence.py` is the publication gate: it compares DominusUltra against a PyTorch reference path using fixed seeds, correctness and LSE checks, warmup iterations, raw CUDA-event samples, matched tensor shapes, source hashes, and an exact environment record.
 
 Report benchmark results with:
 
@@ -92,7 +92,8 @@ Report benchmark results with:
 - Triton version
 - dtype
 - benchmark command
-- raw output
+- untouched JSON and Markdown reports
+- payload SHA-256
 
 That context makes performance claims credible and reproducible.
 
@@ -108,4 +109,4 @@ Good next experiments:
 
 ## Reviewer Takeaway
 
-DominusUltra is a small but complete systems-AI artifact: custom GPU kernels, reference validation, benchmarks, packaging, contributor hygiene, and documentation that explains the engineering tradeoffs. That combination is the signal.
+DominusUltra is a compact systems-AI research artifact: custom GPU kernels, readable references, a falsifiable evidence protocol, packaging, contributor hygiene, and documentation that explains the engineering tradeoffs. The fused kernel remains research code until independent CUDA reports pass.

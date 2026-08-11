@@ -27,8 +27,10 @@ This is an operator-supplied visual capture of one notebook run. It supports the
 
 It is not yet reviewer-complete benchmark evidence because the capture does not print the exact GPU model, CUDA/driver version, PyTorch version, Triton version, dtype, warmup count, measured iterations, source commit, or raw machine-readable output. The operator reported an NVIDIA T4, but that model is not independently visible in the screenshot.
 
-Before promoting these numbers into the main benchmark table, rerun the in-repository report command and commit its generated Markdown and JSON:
+This capture concerns the legacy standalone RoPE experiment and must not be used as proof for the fused attention kernel. To advance the fused prefill/decode project to reproducible Level 2 evidence, run the repository's correctness-gated matrix and submit its untouched Markdown and JSON:
 
 ```bash
-python demo_speedtest.py --seq-len 8192 --dtype bfloat16 --iterations 40
+python gpu_evidence.py --suite quick --dtype auto --warmup 10 --iterations 50
 ```
+
+See [the evidence protocol](../EVIDENCE_PROTOCOL.md) for the exact claim boundary and independent-submission process.

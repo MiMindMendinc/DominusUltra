@@ -5,15 +5,16 @@ Compares Dominus Ultra against PyTorch's native scaled_dot_product_attention
 across various configurations, measuring throughput and memory usage.
 """
 
-import torch
-import torch.nn.functional as F
+import argparse
 import time
 from typing import Dict, List, Optional
-import argparse
+
+import torch
+import torch.nn.functional as F
 
 from dominus_ultra import (
-    dominus_ultra_prefill,
     dominus_ultra_decode,
+    dominus_ultra_prefill,
     precompute_rope_cos_sin,
 )
 

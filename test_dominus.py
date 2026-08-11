@@ -12,9 +12,10 @@ Tests cover:
 import pytest
 import torch
 import torch.nn.functional as F
+
 from dominus_ultra import (
-    dominus_ultra_prefill,
     dominus_ultra_decode,
+    dominus_ultra_prefill,
     precompute_rope_cos_sin,
 )
 from rope import make_half_split_pos_emb

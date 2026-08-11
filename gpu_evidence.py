@@ -32,7 +32,6 @@ from dominus_ultra import (
     precompute_rope_cos_sin,
 )
 
-
 SCHEMA_VERSION = "dominus-ultra-evidence-v1"
 REPOSITORY = "https://github.com/MiMindMendinc/DominusUltra"
 

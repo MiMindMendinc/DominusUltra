@@ -2,6 +2,8 @@
 
 Use `demo_speedtest.py` when you want a clean, recordable benchmark that looks like a live speed test and produces a shareable result afterward.
 
+This is a presentation tool, not the release evidence gate. Before publishing a performance claim, run `gpu_evidence.py` and share its untouched JSON and Markdown outputs as described in the [evidence protocol](EVIDENCE_PROTOCOL.md). If the evidence runner does not return `PASS`, present the run as a failure report rather than a benchmark result.
+
 ## What To Say
 
 Short version:

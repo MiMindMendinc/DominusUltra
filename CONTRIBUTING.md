@@ -19,7 +19,11 @@ If you find a bug, please open an issue on our GitHub repository. When reporting
 
 We welcome suggestions for new features or improvements. Please open an issue to discuss your ideas. Clearly describe the enhancement and why you believe it would be beneficial to the project.
 
-### 3. Submitting Pull Requests (PRs)
+### 3. Submitting GPU Evidence
+
+Passing and failing independent runs are both useful. Follow the [evidence protocol](docs/EVIDENCE_PROTOCOL.md), then attach the untouched JSON and Markdown reports to a Benchmark result issue. Do not replace raw files with a screenshot or remove failed cases.
+
+### 4. Submitting Pull Requests (PRs)
 
 1.  **Fork the Repository**: Start by forking the `Dominus Ultra` repository to your GitHub account.
 2.  **Clone Your Fork**: Clone your forked repository to your local machine:
@@ -48,7 +52,7 @@ We welcome suggestions for new features or improvements. Please open an issue to
 
 ## Coding Standards
 
--   **Python**: Adhere to PEP 8. Use `black` for formatting and `flake8` for linting.
+-   **Python**: Adhere to PEP 8. Use `ruff format` and `ruff check` to match CI.
 -   **Triton**: Follow Triton best practices for kernel development, focusing on memory efficiency, parallelism, and avoiding bank conflicts.
 -   **Documentation**: Ensure all new code is well-commented. Update `README.md` or the relevant files under `docs/` if your changes introduce new features or modify existing behavior.
 -   **Testing**: Write unit tests for new functionalities. We use `pytest`.

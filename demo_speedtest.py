@@ -27,7 +27,6 @@ except Exception:  # pragma: no cover - optional metadata only
 
 from dominus_ultra import dominus_ultra_prefill, precompute_rope_cos_sin
 
-
 RESET = "\033[0m"
 BOLD = "\033[1m"
 DIM = "\033[2m"

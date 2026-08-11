@@ -12,71 +12,151 @@ Supports:
 - Causal masking
 - LSE output for correct incremental decoding
 
-Requirements: torch>=2.4, triton>=3.0, CUDA sm_80+ (Ampere+)
+Requirements: torch>=2.4, triton>=3.0, NVIDIA CUDA GPU (Ampere+ recommended)
 """
 
+from typing import Optional, Tuple
+
+import torch
 import triton  # type: ignore[import-untyped]
 import triton.language as tl  # type: ignore[import-untyped]
-import torch
-from typing import Optional, Tuple
 
 
 def precompute_rope_cos_sin(
-    max_seq_len: int,
-    dim: int,
-    device,
-    dtype=torch.float32,
-    base: float = 10000.0
+    max_seq_len: int, dim: int, device, dtype=torch.float32, base: float = 10000.0
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Pre-compute RoPE (Rotary Position Embedding) cos/sin values.
-    
+
     Args:
         max_seq_len: Maximum sequence length to pre-compute
         dim: Head dimension (must be even)
         device: PyTorch device (e.g., 'cuda', 'cpu')
         dtype: Data type for the tensors (default: torch.float32)
         base: Base value for frequency calculation (default: 10000.0)
-    
+
     Returns:
         Tuple of (cos, sin) tensors, each of shape [max_seq_len, dim//2]
-    
+
     Example:
         >>> cos, sin = precompute_rope_cos_sin(2048, 64, 'cuda', torch.bfloat16)
         >>> cos.shape, sin.shape
         (torch.Size([2048, 32]), torch.Size([2048, 32]))
     """
-    inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim))
+    if max_seq_len <= 0:
+        raise ValueError("max_seq_len must be positive")
+    if dim <= 0 or dim % 2 != 0:
+        raise ValueError("dim must be a positive even integer")
+    if base <= 0:
+        raise ValueError("base must be positive")
+
+    inv_freq = 1.0 / (
+        base ** (torch.arange(0, dim, 2, device=device, dtype=torch.float32) / dim)
+    )
     t = torch.arange(max_seq_len, device=device, dtype=torch.float32)
     freqs = torch.einsum("i,j->ij", t, inv_freq)
-    emb = torch.cat((freqs, freqs), dim=-1)
-    return emb.cos().to(dtype), emb.sin().to(dtype)
+    return freqs.cos().to(dtype), freqs.sin().to(dtype)
+
 
 configs = [
-    triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_M': 256, 'BLOCK_N':  64}, num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_M':  64, 'BLOCK_N': 128}, num_warps=4, num_stages=4),
-    triton.Config({'BLOCK_M': 128, 'BLOCK_N':  64}, num_warps=4, num_stages=4),
-    triton.Config({'BLOCK_M':  64, 'BLOCK_N':  64}, num_warps=4, num_stages=5),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 128}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 256, "BLOCK_N": 64}, num_warps=8, num_stages=3),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 128}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 128, "BLOCK_N": 64}, num_warps=4, num_stages=4),
+    triton.Config({"BLOCK_M": 64, "BLOCK_N": 64}, num_warps=4, num_stages=5),
 ]
 
-@triton.autotune(configs=configs, key=['T'])
+
+def _validate_head_dim(head_dim: int) -> None:
+    if head_dim < 16 or head_dim > 256 or head_dim & (head_dim - 1):
+        raise ValueError("head_dim must be a power of two between 16 and 256")
+
+
+def _validate_rope_tables(
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    positions: int,
+    head_dim: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> None:
+    expected_tail = (head_dim // 2,)
+    if cos.ndim != 2 or sin.ndim != 2:
+        raise ValueError(
+            "cos and sin must be rank-2 [positions, head_dim // 2] tensors"
+        )
+    if cos.shape[0] < positions or sin.shape[0] < positions:
+        raise ValueError(f"cos and sin must contain at least {positions} positions")
+    if cos.shape[1:] != expected_tail or sin.shape[1:] != expected_tail:
+        raise ValueError(f"cos and sin must have trailing shape {expected_tail}")
+    if cos.device != device or sin.device != device:
+        raise ValueError(
+            "cos and sin must be on the same device as the attention tensors"
+        )
+    if cos.dtype != dtype or sin.dtype != dtype:
+        raise ValueError(
+            "cos and sin must have the same dtype as the attention tensors"
+        )
+    if not cos.is_contiguous() or not sin.is_contiguous():
+        raise ValueError("cos and sin must be contiguous")
+
+
+def _validate_attention_tensors(*tensors: torch.Tensor) -> None:
+    first = tensors[0]
+    if not first.is_cuda:
+        raise ValueError("DominusUltra kernels require CUDA tensors")
+    if first.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("attention tensors must use float16 or bfloat16")
+    for tensor in tensors:
+        if tensor.device != first.device:
+            raise ValueError("all attention tensors must be on the same CUDA device")
+        if tensor.dtype != first.dtype:
+            raise ValueError("all attention tensors must have the same dtype")
+        if not tensor.is_contiguous():
+            raise ValueError("attention tensors must be contiguous")
+
+
+@triton.autotune(configs=configs, key=["T", "D", "KvH"])
 @triton.jit
 def prefill_kernel(
-    Q, K, V, Cos, Sin, Out, LSE,
-    stride_qb, stride_qh, stride_qt, stride_qd,
-    stride_kb, stride_kh, stride_kt, stride_kd,
-    stride_vb, stride_vh, stride_vt, stride_vd,
-    stride_ob, stride_oh, stride_ot, stride_od,
-    stride_lseb, stride_lseh, stride_lset,
-    B: tl.constexpr, H: tl.constexpr, KvH: tl.constexpr,
-    T: tl.constexpr, D: tl.constexpr,
+    Q,
+    K,
+    V,
+    Cos,
+    Sin,
+    Out,
+    LSE,
+    stride_qb,
+    stride_qh,
+    stride_qt,
+    stride_qd,
+    stride_kb,
+    stride_kh,
+    stride_kt,
+    stride_kd,
+    stride_vb,
+    stride_vh,
+    stride_vt,
+    stride_vd,
+    stride_ob,
+    stride_oh,
+    stride_ot,
+    stride_od,
+    stride_lseb,
+    stride_lseh,
+    stride_lset,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    KvH: tl.constexpr,
+    T: tl.constexpr,
+    D: tl.constexpr,
     scale: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
 ):
     """
     Triton kernel for prefill phase causal attention with RoPE.
-    
+
     Implements Flash Attention-style online softmax with fused RoPE application.
     Supports Grouped Query Attention by mapping query heads to KV heads.
     """
@@ -91,25 +171,41 @@ def prefill_kernel(
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, D)
 
-    q_ptrs = Q + b*stride_qb + h*stride_qh + offs_m[:,None]*stride_qt + offs_d[None,:]*stride_qd
-    k_ptrs = K + b*stride_kb + kv_h*stride_kh + offs_n[None,:]*stride_kt + offs_d[:,None]*stride_kd
-    v_ptrs = V + b*stride_vb + kv_h*stride_vh + offs_n[None,:]*stride_vt + offs_d[:,None]*stride_vd
+    q_ptrs = (
+        Q
+        + b * stride_qb
+        + h * stride_qh
+        + offs_m[:, None] * stride_qt
+        + offs_d[None, :] * stride_qd
+    )
 
-    mask_q = (offs_m[:,None] < T) & (offs_d[None,:] < D)
-    mask_kv = (offs_n[None,:] < T) & (offs_d[:,None] < D)
-
-    q = tl.load(q_ptrs, mask=mask_q, other=0.0).to(tl.float32)
+    mask_q = (offs_m[:, None] < T) & (offs_d[None, :] < D)
+    q = tl.load(q_ptrs, mask=mask_q, other=0.0)
 
     half = D // 2
-    q1 = q[..., :half]
-    q2 = q[..., half:]
-    cos = tl.load(Cos + offs_m[:,None] * half + tl.arange(0, half)[None,:],
-                  mask=offs_m[:,None] < T, other=1.0)
-    sin = tl.load(Sin + offs_m[:,None] * half + tl.arange(0, half)[None,:],
-                  mask=offs_m[:,None] < T, other=0.0)
-    q_rot = tl.where(offs_d[None,:] < half,
-                     q1 * cos - q2 * sin,
-                     q2 * cos + q1 * sin)
+    rope_d = tl.where(offs_d < half, offs_d, offs_d - half)
+    partner_d = tl.where(offs_d < half, offs_d + half, offs_d - half)
+    q_partner_ptrs = (
+        Q
+        + b * stride_qb
+        + h * stride_qh
+        + offs_m[:, None] * stride_qt
+        + partner_d[None, :] * stride_qd
+    )
+    q_partner = tl.load(q_partner_ptrs, mask=mask_q, other=0.0)
+    cos = tl.load(
+        Cos + offs_m[:, None] * half + rope_d[None, :],
+        mask=offs_m[:, None] < T,
+        other=1.0,
+    )
+    sin = tl.load(
+        Sin + offs_m[:, None] * half + rope_d[None, :],
+        mask=offs_m[:, None] < T,
+        other=0.0,
+    )
+    q_rot = tl.where(
+        offs_d[None, :] < half, q * cos - q_partner * sin, q * cos + q_partner * sin
+    )
 
     acc = tl.zeros((BLOCK_M, D), dtype=tl.float32)
     m_i = tl.full((BLOCK_M,), -float("inf"), dtype=tl.float32)
@@ -118,55 +214,110 @@ def prefill_kernel(
     for start_n in range(0, T, BLOCK_N):
         offs_n_curr = start_n + offs_n
 
-        k = tl.load(k_ptrs + start_n*stride_kt, mask=mask_kv, other=0.0).to(tl.float32)
-        v = tl.load(v_ptrs + start_n*stride_vt, mask=mask_kv, other=0.0).to(tl.float32)
+        mask_kv = (offs_n_curr[:, None] < T) & (offs_d[None, :] < D)
+        k_ptrs = (
+            K
+            + b * stride_kb
+            + kv_h * stride_kh
+            + offs_n_curr[:, None] * stride_kt
+            + offs_d[None, :] * stride_kd
+        )
+        k_partner_ptrs = (
+            K
+            + b * stride_kb
+            + kv_h * stride_kh
+            + offs_n_curr[:, None] * stride_kt
+            + partner_d[None, :] * stride_kd
+        )
+        v_ptrs = (
+            V
+            + b * stride_vb
+            + kv_h * stride_vh
+            + offs_n_curr[:, None] * stride_vt
+            + offs_d[None, :] * stride_vd
+        )
+        k = tl.load(k_ptrs, mask=mask_kv, other=0.0)
+        k_partner = tl.load(k_partner_ptrs, mask=mask_kv, other=0.0)
+        v = tl.load(v_ptrs, mask=mask_kv, other=0.0)
 
-        k1 = k[..., :half]
-        k2 = k[..., half:]
-        cos_k = tl.load(Cos + offs_n_curr[None,:] * half + tl.arange(0, half)[:,None],
-                        mask=(offs_n_curr[None,:] < T), other=1.0)
-        sin_k = tl.load(Sin + offs_n_curr[None,:] * half + tl.arange(0, half)[:,None],
-                        mask=(offs_n_curr[None,:] < T), other=0.0)
-        k_rot = tl.where(tl.arange(0, D)[:,None] < half,
-                         k1 * cos_k - k2 * sin_k,
-                         k2 * cos_k + k1 * sin_k)
+        cos_k = tl.load(
+            Cos + offs_n_curr[:, None] * half + rope_d[None, :],
+            mask=offs_n_curr[:, None] < T,
+            other=1.0,
+        )
+        sin_k = tl.load(
+            Sin + offs_n_curr[:, None] * half + rope_d[None, :],
+            mask=offs_n_curr[:, None] < T,
+            other=0.0,
+        )
+        k_rot = tl.where(
+            offs_d[None, :] < half,
+            k * cos_k - k_partner * sin_k,
+            k * cos_k + k_partner * sin_k,
+        )
 
         qk = tl.dot(q_rot, tl.trans(k_rot)) * scale
-        causal_mask = offs_m[:,None] >= offs_n_curr[None,:]
-        qk = tl.where(causal_mask & (offs_n_curr[None,:] < T), qk, -float("inf"))
+        causal_mask = offs_m[:, None] >= offs_n_curr[None, :]
+        qk = tl.where(causal_mask & (offs_n_curr[None, :] < T), qk, -float("inf"))
 
         m_ij = tl.max(qk, axis=1)
-        p = tl.exp(qk - m_ij[:, None])
+        m_i_new = tl.maximum(m_i, m_ij)
+        alpha = tl.exp(m_i - m_i_new)
+        p = tl.exp(qk - m_i_new[:, None])
         l_ij = tl.sum(p, axis=1)
 
-        alpha = tl.exp(m_i - m_ij)
-        acc = acc * alpha[:, None] + tl.dot(p.to(tl.float32), v)
+        acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v)
 
         l_i = l_i * alpha + l_ij
-        m_i = tl.maximum(m_i, m_ij)
+        m_i = m_i_new
 
     out = acc / l_i[:, None]
-    o_ptrs = Out + b*stride_ob + h*stride_oh + offs_m[:,None]*stride_ot + offs_d[None,:]*stride_od
+    o_ptrs = (
+        Out
+        + b * stride_ob
+        + h * stride_oh
+        + offs_m[:, None] * stride_ot
+        + offs_d[None, :] * stride_od
+    )
     tl.store(o_ptrs, out, mask=mask_q)
 
-    lse_ptrs = LSE + b*stride_lseb + h*stride_lseh + offs_m*stride_lset
+    lse_ptrs = LSE + b * stride_lseb + h * stride_lseh + offs_m * stride_lset
     tl.store(lse_ptrs, m_i + tl.log(l_i), mask=offs_m < T)
+
 
 @triton.jit
 def decode_kernel(
-    Q, K_cache, V_cache, Cos, Sin, Out,
-    stride_qb, stride_qh, stride_qd,
-    stride_kb, stride_kh, stride_kt, stride_kd,
-    stride_vb, stride_vh, stride_vt, stride_vd,
-    stride_ob, stride_oh, stride_od,
-    B: tl.constexpr, H: tl.constexpr, KvH: tl.constexpr,
-    past_T: tl.constexpr, D: tl.constexpr,
+    Q,
+    K_cache,
+    V_cache,
+    Cos,
+    Sin,
+    Out,
+    stride_qb,
+    stride_qh,
+    stride_qd,
+    stride_kb,
+    stride_kh,
+    stride_kt,
+    stride_kd,
+    stride_vb,
+    stride_vh,
+    stride_vt,
+    stride_vd,
+    stride_ob,
+    stride_oh,
+    stride_od,
+    B: tl.constexpr,
+    H: tl.constexpr,
+    KvH: tl.constexpr,
+    past_T: tl.constexpr,
+    D: tl.constexpr,
     scale: tl.constexpr,
-    BLOCK_N: tl.constexpr = 128
+    BLOCK_N: tl.constexpr = 128,
 ):
     """
     Triton kernel for decode phase attention with KV cache.
-    
+
     Processes a single new token against cached key-value pairs.
     Used during autoregressive generation for efficient inference.
     """
@@ -178,17 +329,19 @@ def decode_kernel(
 
     offs_d = tl.arange(0, D)
 
-    q_ptr = Q + b*stride_qb + h*stride_qh + offs_d*stride_qd
-    q = tl.load(q_ptr).to(tl.float32)
+    q_ptr = Q + b * stride_qb + h * stride_qh + offs_d * stride_qd
+    q = tl.load(q_ptr)
 
     half = D // 2
-    q1 = q[:half]
-    q2 = q[half:]
-    cos_q = tl.load(Cos + past_T * half + tl.arange(0, half))
-    sin_q = tl.load(Sin + past_T * half + tl.arange(0, half))
-    q_rot = tl.where(offs_d < half,
-                     q1 * cos_q - q2 * sin_q,
-                     q2 * cos_q + q1 * sin_q)
+    rope_d = tl.where(offs_d < half, offs_d, offs_d - half)
+    partner_d = tl.where(offs_d < half, offs_d + half, offs_d - half)
+    q_partner_ptr = Q + b * stride_qb + h * stride_qh + partner_d * stride_qd
+    q_partner = tl.load(q_partner_ptr)
+    cos_q = tl.load(Cos + past_T * half + rope_d)
+    sin_q = tl.load(Sin + past_T * half + rope_d)
+    q_rot = tl.where(
+        offs_d < half, q * cos_q - q_partner * sin_q, q * cos_q + q_partner * sin_q
+    )
 
     acc = tl.zeros((D,), dtype=tl.float32)
     m_i = -float("inf")
@@ -199,38 +352,66 @@ def decode_kernel(
 
         mask = offs_n < past_T
 
-        k_ptrs = K_cache + b*stride_kb + kv_h*stride_kh + offs_n[:,None]*stride_kt + offs_d[None,:]*stride_kd
-        v_ptrs = V_cache + b*stride_vb + kv_h*stride_vh + offs_n[:,None]*stride_vt + offs_d[None,:]*stride_vd
+        k_ptrs = (
+            K_cache
+            + b * stride_kb
+            + kv_h * stride_kh
+            + offs_n[:, None] * stride_kt
+            + offs_d[None, :] * stride_kd
+        )
+        v_ptrs = (
+            V_cache
+            + b * stride_vb
+            + kv_h * stride_vh
+            + offs_n[:, None] * stride_vt
+            + offs_d[None, :] * stride_vd
+        )
 
-        k = tl.load(k_ptrs, mask=mask[:,None], other=0.0).to(tl.float32)
-        v = tl.load(v_ptrs, mask=mask[:,None], other=0.0).to(tl.float32)
+        k = tl.load(k_ptrs, mask=mask[:, None], other=0.0)
+        v = tl.load(v_ptrs, mask=mask[:, None], other=0.0)
 
-        k1 = k[:, :half]
-        k2 = k[:, half:]
-        cos_k = tl.load(Cos + offs_n[:,None] * half + tl.arange(0, half)[None,:],
-                        mask=mask[:,None], other=1.0)
-        sin_k = tl.load(Sin + offs_n[:,None] * half + tl.arange(0, half)[None,:],
-                        mask=mask[:,None], other=0.0)
-        k_rot = tl.where(tl.arange(0,D)[None,:] < half,
-                         k1 * cos_k - k2 * sin_k,
-                         k2 * cos_k + k1 * sin_k)
+        k_partner_ptrs = (
+            K_cache
+            + b * stride_kb
+            + kv_h * stride_kh
+            + offs_n[:, None] * stride_kt
+            + partner_d[None, :] * stride_kd
+        )
+        k_partner = tl.load(k_partner_ptrs, mask=mask[:, None], other=0.0)
+        cos_k = tl.load(
+            Cos + offs_n[:, None] * half + rope_d[None, :],
+            mask=mask[:, None],
+            other=1.0,
+        )
+        sin_k = tl.load(
+            Sin + offs_n[:, None] * half + rope_d[None, :],
+            mask=mask[:, None],
+            other=0.0,
+        )
+        k_rot = tl.where(
+            offs_d[None, :] < half,
+            k * cos_k - k_partner * sin_k,
+            k * cos_k + k_partner * sin_k,
+        )
 
-        qk = tl.dot(q_rot[None,:], tl.trans(k_rot)) * scale
-        qk = tl.where(mask[None,:], qk, -float("inf"))
+        qk = tl.sum(k_rot * q_rot[None, :], axis=1) * scale
+        qk = tl.where(mask, qk, -float("inf"))
 
-        m_ij = tl.max(qk, axis=1)[0]
-        p = tl.exp(qk - m_ij)
-        l_ij = tl.sum(p, axis=1)[0]
+        m_ij = tl.max(qk, axis=0)
+        m_i_new = tl.maximum(m_i, m_ij)
+        alpha = tl.exp(m_i - m_i_new)
+        p = tl.exp(qk - m_i_new)
+        l_ij = tl.sum(p, axis=0)
 
-        alpha = tl.exp(m_i - m_ij)
-        acc = acc * alpha + tl.dot(p[0,:].to(tl.float32), v)
+        acc = acc * alpha + tl.sum(p[:, None] * v, axis=0)
 
         l_i = l_i * alpha + l_ij
-        m_i = tl.max(m_i, m_ij)
+        m_i = m_i_new
 
     out = acc / l_i
-    o_ptr = Out + b*stride_ob + h*stride_oh + offs_d*stride_od
+    o_ptr = Out + b * stride_ob + h * stride_oh + offs_d * stride_od
     tl.store(o_ptr, out)
+
 
 def dominus_ultra_prefill(
     q: torch.Tensor,
@@ -238,14 +419,14 @@ def dominus_ultra_prefill(
     v: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
-    num_kv_heads: Optional[int] = None
+    num_kv_heads: Optional[int] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Prefill phase attention with RoPE and optional Grouped Query Attention.
-    
+
     Computes causal multi-head attention with fused Rotary Position Embeddings.
     Supports Grouped Query Attention (GQA) and Multi-Query Attention (MQA).
-    
+
     Args:
         q: Query tensor of shape [batch, num_heads, seq_len, head_dim]
         k: Key tensor of shape [batch, num_kv_heads, seq_len, head_dim]
@@ -253,12 +434,12 @@ def dominus_ultra_prefill(
         cos: Pre-computed cosine values from precompute_rope_cos_sin
         sin: Pre-computed sine values from precompute_rope_cos_sin
         num_kv_heads: Number of KV heads for GQA. If None, uses num_query_heads (MHA)
-    
+
     Returns:
         Tuple of:
             - out: Output tensor of shape [batch, num_heads, seq_len, head_dim]
             - lse: Log-sum-exp values of shape [batch, num_heads, seq_len]
-    
+
     Example:
         >>> B, Hq, Hk, T, D = 2, 32, 8, 1024, 64
         >>> q = torch.randn(B, Hq, T, D, device='cuda', dtype=torch.bfloat16)
@@ -267,27 +448,58 @@ def dominus_ultra_prefill(
         >>> cos, sin = precompute_rope_cos_sin(T, D, 'cuda', torch.bfloat16)
         >>> out, lse = dominus_ultra_prefill(q, k, v, cos, sin, num_kv_heads=Hk)
     """
+    if q.ndim != 4 or k.ndim != 4 or v.ndim != 4:
+        raise ValueError("q, k, and v must be rank-4 tensors")
+
     B, Hq, T, D = q.shape
     _, Hk, _, _ = k.shape
     KvH = num_kv_heads if num_kv_heads is not None else Hq
-    assert Hk == KvH
-    assert D % 2 == 0
+    if B <= 0 or Hq <= 0 or T <= 0:
+        raise ValueError("batch, heads, and sequence length must be positive")
+    if KvH <= 0 or Hq % KvH != 0:
+        raise ValueError("num_query_heads must be divisible by num_kv_heads")
+    if k.shape != (B, KvH, T, D) or v.shape != (B, KvH, T, D):
+        raise ValueError(
+            "k and v must have shape [batch, num_kv_heads, seq_len, head_dim]"
+        )
+    if Hk != KvH:
+        raise ValueError("k head count does not match num_kv_heads")
+
+    _validate_head_dim(D)
+    _validate_attention_tensors(q, k, v)
+    _validate_rope_tables(cos, sin, T, D, q.device, q.dtype)
 
     out = torch.empty_like(q)
     lse = torch.empty((B, Hq, T), dtype=torch.float32, device=q.device)
 
-    scale = 1.0 / (D ** 0.5)
+    scale = 1.0 / (D**0.5)
 
     def grid(meta):
-        return (triton.cdiv(T, meta['BLOCK_M']), B * Hq)
+        return (triton.cdiv(T, meta["BLOCK_M"]), B * Hq)
 
     prefill_kernel[grid](
-        q, k, v, cos, sin, out, lse,
-        *q.stride(), *k.stride(), *v.stride(), *out.stride(), *lse.stride(),
-        B=B, H=Hq, KvH=KvH, T=T, D=D, scale=scale
+        q,
+        k,
+        v,
+        cos,
+        sin,
+        out,
+        lse,
+        *q.stride(),
+        *k.stride(),
+        *v.stride(),
+        *out.stride(),
+        *lse.stride(),
+        B=B,
+        H=Hq,
+        KvH=KvH,
+        T=T,
+        D=D,
+        scale=scale,
     )
 
     return out, lse
+
 
 def dominus_ultra_decode(
     q_new: torch.Tensor,
@@ -295,14 +507,14 @@ def dominus_ultra_decode(
     v_cache: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
-    num_kv_heads: Optional[int] = None
+    num_kv_heads: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Decode phase attention for autoregressive generation with KV cache.
-    
+
     Computes attention for a single new token against cached key-value pairs.
     Supports Grouped Query Attention (GQA) and Multi-Query Attention (MQA).
-    
+
     Args:
         q_new: New query tensor of shape [batch, num_heads, 1, head_dim]
         k_cache: Cached key tensor of shape [batch, num_kv_heads, past_len, head_dim]
@@ -310,10 +522,10 @@ def dominus_ultra_decode(
         cos: Pre-computed cosine values from precompute_rope_cos_sin
         sin: Pre-computed sine values from precompute_rope_cos_sin
         num_kv_heads: Number of KV heads for GQA. If None, uses num_query_heads (MHA)
-    
+
     Returns:
         Output tensor of shape [batch, num_heads, 1, head_dim]
-    
+
     Example:
         >>> B, Hq, Hk, past_T, D = 2, 32, 8, 1024, 64
         >>> q_new = torch.randn(B, Hq, 1, D, device='cuda', dtype=torch.bfloat16)
@@ -322,25 +534,54 @@ def dominus_ultra_decode(
         >>> cos, sin = precompute_rope_cos_sin(past_T + 1, D, 'cuda', torch.bfloat16)
         >>> out = dominus_ultra_decode(q_new, k_cache, v_cache, cos, sin, num_kv_heads=Hk)
     """
+    if q_new.ndim != 4 or k_cache.ndim != 4 or v_cache.ndim != 4:
+        raise ValueError("q_new, k_cache, and v_cache must be rank-4 tensors")
+
     B, Hq, _, D = q_new.shape
     _, Hk, past_T, _ = k_cache.shape
     KvH = num_kv_heads if num_kv_heads is not None else Hq
-    assert Hk == KvH
-    assert D % 2 == 0
+    if q_new.shape[2] != 1:
+        raise ValueError("q_new must contain exactly one sequence position")
+    if B <= 0 or Hq <= 0 or past_T <= 0:
+        raise ValueError("batch, heads, and cache length must be positive")
+    if KvH <= 0 or Hq % KvH != 0:
+        raise ValueError("num_query_heads must be divisible by num_kv_heads")
+    if k_cache.shape != (B, KvH, past_T, D) or v_cache.shape != (B, KvH, past_T, D):
+        raise ValueError("k_cache and v_cache must have matching GQA cache shapes")
+    if Hk != KvH:
+        raise ValueError("cache head count does not match num_kv_heads")
+
+    _validate_head_dim(D)
+    _validate_attention_tensors(q_new, k_cache, v_cache)
+    _validate_rope_tables(cos, sin, past_T + 1, D, q_new.device, q_new.dtype)
 
     out = torch.empty_like(q_new).squeeze(2)
 
-    scale = 1.0 / (D ** 0.5)
+    scale = 1.0 / (D**0.5)
 
     grid = (B * Hq,)
 
     decode_kernel[grid](
-        q_new.squeeze(2), k_cache, v_cache, cos, sin, out,
-        *q_new.squeeze(2).stride(), *k_cache.stride(), *v_cache.stride(), *out.stride(),
-        B=B, H=Hq, KvH=KvH, past_T=past_T, D=D, scale=scale
+        q_new.squeeze(2),
+        k_cache,
+        v_cache,
+        cos,
+        sin,
+        out,
+        *q_new.squeeze(2).stride(),
+        *k_cache.stride(),
+        *v_cache.stride(),
+        *out.stride(),
+        B=B,
+        H=Hq,
+        KvH=KvH,
+        past_T=past_T,
+        D=D,
+        scale=scale,
     )
 
     return out.unsqueeze(2)
+
 
 def _main() -> int:
     import argparse
@@ -365,7 +606,9 @@ def _main() -> int:
         return 0
 
     if not torch.cuda.is_available():
-        raise SystemExit("--self-test requires CUDA (torch.cuda.is_available() is false)")
+        raise SystemExit(
+            "--self-test requires CUDA (torch.cuda.is_available() is false)"
+        )
 
     torch.manual_seed(42)
     device = "cuda"
@@ -394,9 +637,12 @@ def _main() -> int:
     )
 
     diff = (out_triton.to(torch.float32) - out_ref).abs().max().item()
+    passed = torch.allclose(
+        out_triton.to(torch.float32), out_ref, atol=2.0e-2, rtol=2.0e-2
+    )
     print(f"Max abs diff vs torch.sdpa (manual RoPE): {diff:.6f}")
-    print("Test passed if diff < 1e-3 (bf16 tolerance)")
-    return 0
+    print(f"Correctness gate: {'PASS' if passed else 'FAIL'}")
+    return 0 if passed else 1
 
 
 if __name__ == "__main__":

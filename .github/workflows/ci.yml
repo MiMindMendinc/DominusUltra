@@ -35,10 +35,13 @@ jobs:
         run: ruff check .
 
       - name: Type check
-        run: mypy dominus_ultra.py rope.py benchmark.py demo_speedtest.py
+        run: mypy dominus_ultra.py rope.py benchmark.py demo_speedtest.py gpu_evidence.py
 
       - name: Compile Python sources
-        run: python -m compileall -q dominus_ultra.py rope.py benchmark.py demo_speedtest.py
+        run: python -m compileall -q dominus_ultra.py rope.py benchmark.py demo_speedtest.py gpu_evidence.py test_dominus.py
+
+      - name: Validate Colab notebook JSON
+        run: python -m json.tool colab/DominusUltra_GPU_Evidence.ipynb > /dev/null
 
       - name: Run tests
         run: pytest -q

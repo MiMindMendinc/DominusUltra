@@ -1,313 +1,315 @@
-"""Triton RoPE Kernel.
+"""Standalone half-split Rotary Position Embedding kernels.
 
-Standalone Triton implementation of Rotary Position Embedding (RoPE) for Q/K in transformers.
+This module exposes forward and explicit backward transforms for Q/K tensors.
+It uses the same half-split RoPE convention as ``dominus_ultra.py`` and keeps a
+small correctness-gated command-line benchmark for focused RoPE experiments.
 """
+
+from __future__ import annotations
+
+import argparse
+import statistics
+from typing import Callable, Optional, Tuple
 
 import torch
 import triton  # type: ignore[import-untyped]
 import triton.language as tl  # type: ignore[import-untyped]
-import time
-from typing import Optional
 
-@triton.autotune(
-    configs=[
-        # Large configs for high throughput
-        triton.Config({'BLOCK_M': 256, 'BLOCK_D': 128}, num_stages=4, num_warps=8),
-        triton.Config({'BLOCK_M': 512, 'BLOCK_D': 128}, num_stages=4, num_warps=8),
-        triton.Config({'BLOCK_M': 1024, 'BLOCK_D': 64}, num_stages=5, num_warps=16),
-        triton.Config({'BLOCK_M': 2048, 'BLOCK_D': 32}, num_stages=5, num_warps=16),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_D': 256}, num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_D': 512}, num_stages=2, num_warps=4),
-        # Small configs for low latency / small sequences (added 2026)
-        triton.Config({'BLOCK_M': 32, 'BLOCK_D': 512}, num_stages=2, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_D': 256}, num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_D': 128}, num_stages=4, num_warps=8),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_D': 64}, num_stages=5, num_warps=8),
-        # Note: For Hopper GPUs (sm_90+), consider TMA-enabled configs for ~10-20% bandwidth boost
-    ],
-    key=['seq_len', 'head_dim', 'dtype'],
-)
+
 @triton.jit
-def rope_kernel(
-    q_ptr, k_ptr, out_q_ptr, out_k_ptr,
-    seq_len, head_dim, base, scale_factor,
-    stride_qb, stride_qh, stride_qs, stride_qd,
-    stride_kb, stride_kh, stride_ks, stride_kd,
-    stride_ob, stride_oh, stride_os, stride_od,
-    BLOCK_M: tl.constexpr,
-    BLOCK_D: tl.constexpr,
+def _rope_kernel(
+    Q,
+    K,
+    Cos,
+    Sin,
+    OutQ,
+    OutK,
+    stride_qb,
+    stride_qh,
+    stride_qt,
+    stride_qd,
+    stride_kb,
+    stride_kh,
+    stride_kt,
+    stride_kd,
+    stride_oqb,
+    stride_oqh,
+    stride_oqt,
+    stride_oqd,
+    stride_okb,
+    stride_okh,
+    stride_okt,
+    stride_okd,
+    H: tl.constexpr,
+    T: tl.constexpr,
+    D: tl.constexpr,
+    BACKWARD: tl.constexpr,
 ):
-    pid_b = tl.program_id(0)
-    pid_h = tl.program_id(1)
-    pid_m = tl.program_id(2)
-    batch_offset = pid_b * stride_qb
-    head_offset = pid_h * stride_qh
-    m_offset = pid_m * BLOCK_M
-    q_ptrs = q_ptr + batch_offset + head_offset + m_offset * stride_qs
-    k_ptrs = k_ptr + batch_offset + head_offset + m_offset * stride_ks
-    out_q_ptrs = out_q_ptr + batch_offset + head_offset + m_offset * stride_os
-    out_k_ptrs = out_k_ptr + batch_offset + head_offset + m_offset * stride_ks
-    offs_m = m_offset + tl.arange(0, BLOCK_M)
-    offs_d = tl.arange(0, BLOCK_D)
-    mask_m = offs_m < seq_len
-    mask_d = offs_d < head_dim
-    q = tl.load(q_ptrs + offs_m[:, None] * stride_qs + offs_d[None, :] * stride_qd,
-                mask=mask_m[:, None] & mask_d[None, :], other=0.0)
-    k = tl.load(k_ptrs + offs_m[:, None] * stride_ks + offs_d[None, :] * stride_kd,
-                mask=mask_m[:, None] & mask_d[None, :], other=0.0)
-    # Dynamic theta computation inside kernel (2026 Elite)
-    theta = base ** (-tl.arange(0, head_dim, 2, dtype=tl.float32) / head_dim) * scale_factor
-    positions = offs_m.to(tl.float32)[:, None]
-    angles = positions * theta[None, :]
-    cos = tl.cos(angles)
-    sin = tl.sin(angles)
-    cos_sin = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
-    cos_sin = tl.where((offs_d[None, :] % 2) == 0, cos, sin)
-    q_even = q[:, 0::2]
-    q_odd = q[:, 1::2]
-    k_even = k[:, 0::2]
-    k_odd = k[:, 1::2]
-    cos_even = cos_sin[:, 0::2]
-    sin_even = cos_sin[:, 1::2]
-    q_rot_even = q_even * cos_even - q_odd * sin_even
-    q_rot_odd = q_even * sin_even + q_odd * cos_even
-    k_rot_even = k_even * cos_even - k_odd * sin_even
-    k_rot_odd = k_even * sin_even + k_odd * cos_even
-    out_q = tl.zeros((BLOCK_M, BLOCK_D), dtype=q.dtype)
-    out_k = tl.zeros((BLOCK_M, BLOCK_D), dtype=k.dtype)
-    out_q[:, 0::2] = q_rot_even
-    out_q[:, 1::2] = q_rot_odd
-    out_k[:, 0::2] = k_rot_even
-    out_k[:, 1::2] = k_rot_odd
-    tl.store(out_q_ptrs + offs_m[:, None] * stride_os + offs_d[None, :] * stride_od,
-             out_q, mask=mask_m[:, None] & mask_d[None, :])
-    tl.store(out_k_ptrs + offs_m[:, None] * stride_ks + offs_d[None, :] * stride_kd,
-             out_k, mask=mask_m[:, None] & mask_d[None, :])
+    row = tl.program_id(0)
+    t = row % T
+    h = (row // T) % H
+    b = row // (H * T)
 
-@triton.autotune(
-    configs=[
-        triton.Config({'BLOCK_M': 256, 'BLOCK_D': 128}, num_stages=4, num_warps=8),
-        triton.Config({'BLOCK_M': 512, 'BLOCK_D': 128}, num_stages=4, num_warps=8),
-        triton.Config({'BLOCK_M': 1024, 'BLOCK_D': 64}, num_stages=5, num_warps=16),
-        triton.Config({'BLOCK_M': 2048, 'BLOCK_D': 32}, num_stages=5, num_warps=16),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_D': 256}, num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_D': 512}, num_stages=2, num_warps=4),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_D': 512}, num_stages=2, num_warps=4),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_D': 256}, num_stages=3, num_warps=4),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_D': 128}, num_stages=4, num_warps=8),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_D': 64}, num_stages=5, num_warps=8),
-    ],
-    key=['seq_len', 'head_dim', 'dtype'],
-)
-@triton.jit
-def rope_backward_kernel(
-    grad_out_q_ptr, grad_out_k_ptr, grad_q_ptr, grad_k_ptr,
-    seq_len, head_dim, base, scale_factor,
-    stride_gqb, stride_gqh, stride_gqs, stride_gqd,
-    stride_gkb, stride_gkh, stride_gks, stride_gkd,
-    stride_gb, stride_gh, stride_gs, stride_gd,
-    BLOCK_M: tl.constexpr,
-    BLOCK_D: tl.constexpr,
-):
-    pid_b = tl.program_id(0)
-    pid_h = tl.program_id(1)
-    pid_m = tl.program_id(2)
-    batch_offset = pid_b * stride_gqb
-    head_offset = pid_h * stride_gqh
-    m_offset = pid_m * BLOCK_M
-    grad_out_q_ptrs = grad_out_q_ptr + batch_offset + head_offset + m_offset * stride_gqs
-    grad_out_k_ptrs = grad_out_k_ptr + batch_offset + head_offset + m_offset * stride_gks
-    grad_q_ptrs = grad_q_ptr + batch_offset + head_offset + m_offset * stride_gs
-    grad_k_ptrs = grad_k_ptr + batch_offset + head_offset + m_offset * stride_gks
-    offs_m = m_offset + tl.arange(0, BLOCK_M)
-    offs_d = tl.arange(0, BLOCK_D)
-    mask_m = offs_m < seq_len
-    mask_d = offs_d < head_dim
-    grad_out_q = tl.load(grad_out_q_ptrs + offs_m[:, None] * stride_gqs + offs_d[None, :] * stride_gqd,
-                         mask=mask_m[:, None] & mask_d[None, :], other=0.0)
-    grad_out_k = tl.load(grad_out_k_ptrs + offs_m[:, None] * stride_gks + offs_d[None, :] * stride_gkd,
-                         mask=mask_m[:, None] & mask_d[None, :], other=0.0)
-    # Dynamic theta computation inside backward kernel (2026 Elite)
-    theta = base ** (-tl.arange(0, head_dim, 2, dtype=tl.float32) / head_dim) * scale_factor
-    positions = offs_m.to(tl.float32)[:, None]
-    angles = positions * theta[None, :]
-    cos = tl.cos(angles)
-    sin = tl.sin(angles)
-    cos_sin = tl.zeros((BLOCK_M, BLOCK_D), dtype=tl.float32)
-    cos_sin = tl.where((offs_d[None, :] % 2) == 0, cos, sin)
-    grad_out_q_even = grad_out_q[:, 0::2]
-    grad_out_q_odd = grad_out_q[:, 1::2]
-    grad_out_k_even = grad_out_k[:, 0::2]
-    grad_out_k_odd = grad_out_k[:, 1::2]
-    cos_even = cos_sin[:, 0::2]
-    sin_even = cos_sin[:, 1::2]
-    # Backward: grad_q_even = grad_out_q_even * cos + grad_out_q_odd * sin
-    # grad_q_odd = -grad_out_q_even * sin + grad_out_q_odd * cos
-    grad_q_even = grad_out_q_even * cos_even + grad_out_q_odd * sin_even
-    grad_q_odd = -grad_out_q_even * sin_even + grad_out_q_odd * cos_even
-    grad_k_even = grad_out_k_even * cos_even + grad_out_k_odd * sin_even
-    grad_k_odd = -grad_out_k_even * sin_even + grad_out_k_odd * cos_even
-    grad_q = tl.zeros((BLOCK_M, BLOCK_D), dtype=grad_out_q.dtype)
-    grad_k = tl.zeros((BLOCK_M, BLOCK_D), dtype=grad_out_k.dtype)
-    grad_q[:, 0::2] = grad_q_even
-    grad_q[:, 1::2] = grad_q_odd
-    grad_k[:, 0::2] = grad_k_even
-    grad_k[:, 1::2] = grad_k_odd
-    tl.store(grad_q_ptrs + offs_m[:, None] * stride_gs + offs_d[None, :] * stride_gd,
-             grad_q, mask=mask_m[:, None] & mask_d[None, :])
-    tl.store(grad_k_ptrs + offs_m[:, None] * stride_gks + offs_d[None, :] * stride_gkd,
-             grad_k, mask=mask_m[:, None] & mask_d[None, :])
+    offs_d = tl.arange(0, D)
+    half = D // 2
+    rope_d = tl.where(offs_d < half, offs_d, offs_d - half)
+    partner_d = tl.where(offs_d < half, offs_d + half, offs_d - half)
 
-def apply_rope(q: torch.Tensor, k: torch.Tensor,
-               base: float = 10000.0, scale_factor: float = 1.0,
-               out_q: Optional[torch.Tensor] = None, out_k: Optional[torch.Tensor] = None):
-    assert q.shape == k.shape, "Q and K shapes must match"
-    bs, heads, seq_len, head_dim = q.shape
-    assert head_dim % 2 == 0, "head_dim must be even"
-    if out_q is None:
-        out_q = torch.empty_like(q)
-    if out_k is None:
-        out_k = torch.empty_like(k)
-    def grid(meta):
-        return (bs, heads, triton.cdiv(seq_len, meta['BLOCK_M']))
-    rope_kernel[grid](
-        q, k, out_q, out_k,
-        seq_len, head_dim, base, scale_factor,
-        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
-        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        out_q.stride(0), out_q.stride(1), out_q.stride(2), out_q.stride(3),
+    q_base = Q + b * stride_qb + h * stride_qh + t * stride_qt
+    k_base = K + b * stride_kb + h * stride_kh + t * stride_kt
+    q = tl.load(q_base + offs_d * stride_qd)
+    k = tl.load(k_base + offs_d * stride_kd)
+    q_partner = tl.load(q_base + partner_d * stride_qd)
+    k_partner = tl.load(k_base + partner_d * stride_kd)
+
+    cos = tl.load(Cos + t * half + rope_d)
+    sin = tl.load(Sin + t * half + rope_d)
+    if BACKWARD:
+        out_q = tl.where(
+            offs_d < half,
+            q * cos + q_partner * sin,
+            q * cos - q_partner * sin,
+        )
+        out_k = tl.where(
+            offs_d < half,
+            k * cos + k_partner * sin,
+            k * cos - k_partner * sin,
+        )
+    else:
+        out_q = tl.where(
+            offs_d < half,
+            q * cos - q_partner * sin,
+            q * cos + q_partner * sin,
+        )
+        out_k = tl.where(
+            offs_d < half,
+            k * cos - k_partner * sin,
+            k * cos + k_partner * sin,
+        )
+
+    out_q_base = OutQ + b * stride_oqb + h * stride_oqh + t * stride_oqt
+    out_k_base = OutK + b * stride_okb + h * stride_okh + t * stride_okt
+    tl.store(out_q_base + offs_d * stride_oqd, out_q)
+    tl.store(out_k_base + offs_d * stride_okd, out_k)
+
+
+def _validate_pair(first: torch.Tensor, second: torch.Tensor) -> None:
+    if first.ndim != 4 or second.ndim != 4 or first.shape != second.shape:
+        raise ValueError("Q and K must have the same rank-4 [B, H, T, D] shape")
+    if not first.is_cuda or not second.is_cuda:
+        raise ValueError("the standalone RoPE kernels require CUDA tensors")
+    if first.device != second.device or first.dtype != second.dtype:
+        raise ValueError("Q and K must have the same device and dtype")
+    if first.dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("Q and K must use float16 or bfloat16")
+    if not first.is_contiguous() or not second.is_contiguous():
+        raise ValueError("Q and K must be contiguous")
+    head_dim = first.shape[-1]
+    if head_dim < 16 or head_dim > 256 or head_dim & (head_dim - 1):
+        raise ValueError("head_dim must be a power of two between 16 and 256")
+
+
+def _validate_output(output: torch.Tensor, reference: torch.Tensor, name: str) -> None:
+    if (
+        output.shape != reference.shape
+        or output.device != reference.device
+        or output.dtype != reference.dtype
+        or not output.is_contiguous()
+    ):
+        raise ValueError(
+            f"{name} must be contiguous and match its input shape/device/dtype"
+        )
+
+
+def make_half_split_pos_emb(
+    seq_len: int,
+    head_dim: int,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float32,
+    base: float = 10000.0,
+    scale_factor: float = 1.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Create half-width cosine and sine tables used by half-split RoPE."""
+    if seq_len <= 0:
+        raise ValueError("seq_len must be positive")
+    if head_dim <= 0 or head_dim % 2:
+        raise ValueError("head_dim must be a positive even integer")
+    if base <= 0 or scale_factor <= 0:
+        raise ValueError("base and scale_factor must be positive")
+    inv_freq = 1.0 / (
+        base
+        ** (torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim)
     )
-    return out_q, out_k
-
-def apply_rope_backward(grad_out_q: torch.Tensor, grad_out_k: torch.Tensor,
-                        base: float = 10000.0, scale_factor: float = 1.0,
-                        grad_q: Optional[torch.Tensor] = None, grad_k: Optional[torch.Tensor] = None):
-    assert grad_out_q.shape == grad_out_k.shape, "grad_out_q and grad_out_k shapes must match"
-    bs, heads, seq_len, head_dim = grad_out_q.shape
-    assert head_dim % 2 == 0, "head_dim must be even"
-    if grad_q is None:
-        grad_q = torch.empty_like(grad_out_q)
-    if grad_k is None:
-        grad_k = torch.empty_like(grad_out_k)
-    def grid(meta):
-        return (bs, heads, triton.cdiv(seq_len, meta['BLOCK_M']))
-    rope_backward_kernel[grid](
-        grad_out_q, grad_out_k, grad_q, grad_k,
-        seq_len, head_dim, base, scale_factor,
-        grad_out_q.stride(0), grad_out_q.stride(1), grad_out_q.stride(2), grad_out_q.stride(3),
-        grad_out_k.stride(0), grad_out_k.stride(1), grad_out_k.stride(2), grad_out_k.stride(3),
-        grad_q.stride(0), grad_q.stride(1), grad_q.stride(2), grad_q.stride(3),
+    inv_freq = inv_freq * scale_factor
+    angles = (
+        torch.arange(seq_len, device=device, dtype=torch.float32)[:, None]
+        * inv_freq[None, :]
     )
-    return grad_q, grad_k
+    return angles.cos().to(dtype), angles.sin().to(dtype)
 
-def make_interleaved_pos_emb(seq_len: int, head_dim: int, device='cuda', dtype=torch.float32,
-                             base: float = 10000.0, scale_factor: float = 1.0):
-    """
-    Create interleaved cos/sin embeddings for RoPE.
 
-    Args:
-        seq_len: Sequence length
-        head_dim: Head dimension (must be even)
-        device: PyTorch device
-        dtype: Data type
-        base: Base for frequency calculation (default: 10000.0)
-        scale_factor: NTK/YaRN scaling factor (default: 1.0)
+def make_interleaved_pos_emb(
+    seq_len: int,
+    head_dim: int,
+    device: str = "cuda",
+    dtype: torch.dtype = torch.float32,
+    base: float = 10000.0,
+    scale_factor: float = 1.0,
+) -> torch.Tensor:
+    """Compatibility helper returning ``[cos_0, sin_0, ...]`` columns."""
+    cos, sin = make_half_split_pos_emb(
+        seq_len, head_dim, device, dtype, base, scale_factor
+    )
+    output = torch.empty((seq_len, head_dim), device=device, dtype=dtype)
+    output[:, 0::2] = cos
+    output[:, 1::2] = sin
+    return output
 
-    Returns:
-        Tensor of shape [seq_len, head_dim] with cos/sin interleaved
-    """
-    theta = base ** (-torch.arange(0, head_dim, 2, device=device, dtype=torch.float32) / head_dim) * scale_factor
-    positions = torch.arange(seq_len, device=device, dtype=torch.float32).unsqueeze(1)
-    angles = positions * theta
-    cos = torch.cos(angles)
-    sin = torch.sin(angles)
-    emb = torch.zeros(seq_len, head_dim, device=device, dtype=dtype)
-    emb[:, 0::2] = cos
-    emb[:, 1::2] = sin
-    return emb
 
-def _finite_diff_grad_check(func, inputs, outputs, grad_outputs, eps=1e-4):
-    """Simple finite difference gradient check."""
-    grads_fd = []
-    for i, inp in enumerate(inputs):
-        grad_fd = torch.zeros_like(inp)
-        for idx in torch.ndindex(inp.shape):
-            inp_orig = inp[idx].clone()
-            inp[idx] = inp_orig + eps
-            out_pos = func(*inputs)
-            loss_pos = (out_pos * grad_outputs).sum()
-            inp[idx] = inp_orig - eps
-            out_neg = func(*inputs)
-            loss_neg = (out_neg * grad_outputs).sum()
-            inp[idx] = inp_orig
-            grad_fd[idx] = (loss_pos - loss_neg) / (2 * eps)
-        grads_fd.append(grad_fd)
-    return grads_fd
+def _launch(
+    first: torch.Tensor,
+    second: torch.Tensor,
+    output_first: torch.Tensor,
+    output_second: torch.Tensor,
+    base: float,
+    scale_factor: float,
+    backward: bool,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    _validate_pair(first, second)
+    _validate_output(output_first, first, "first output")
+    _validate_output(output_second, second, "second output")
+    B, H, T, D = first.shape
+    cos, sin = make_half_split_pos_emb(
+        T, D, str(first.device), first.dtype, base, scale_factor
+    )
+    _rope_kernel[(B * H * T,)](
+        first,
+        second,
+        cos,
+        sin,
+        output_first,
+        output_second,
+        *first.stride(),
+        *second.stride(),
+        *output_first.stride(),
+        *output_second.stride(),
+        H=H,
+        T=T,
+        D=D,
+        BACKWARD=backward,
+    )
+    return output_first, output_second
 
-if __name__ == '__main__':
+
+def apply_rope(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    base: float = 10000.0,
+    scale_factor: float = 1.0,
+    out_q: Optional[torch.Tensor] = None,
+    out_k: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Apply half-split RoPE to Q and K."""
+    out_q = torch.empty_like(q) if out_q is None else out_q
+    out_k = torch.empty_like(k) if out_k is None else out_k
+    return _launch(q, k, out_q, out_k, base, scale_factor, backward=False)
+
+
+def apply_rope_backward(
+    grad_out_q: torch.Tensor,
+    grad_out_k: torch.Tensor,
+    base: float = 10000.0,
+    scale_factor: float = 1.0,
+    grad_q: Optional[torch.Tensor] = None,
+    grad_k: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Apply the exact transpose rotation to Q/K output gradients."""
+    grad_q = torch.empty_like(grad_out_q) if grad_q is None else grad_q
+    grad_k = torch.empty_like(grad_out_k) if grad_k is None else grad_k
+    return _launch(
+        grad_out_q,
+        grad_out_k,
+        grad_q,
+        grad_k,
+        base,
+        scale_factor,
+        backward=True,
+    )
+
+
+def _reference(
+    tensor: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, backward: bool = False
+) -> torch.Tensor:
+    half = tensor.shape[-1] // 2
+    low, high = tensor[..., :half], tensor[..., half:]
+    if backward:
+        return torch.cat((low * cos + high * sin, high * cos - low * sin), dim=-1)
+    return torch.cat((low * cos - high * sin, high * cos + low * sin), dim=-1)
+
+
+def _time_cuda(function: Callable[[], object], warmup: int, iterations: int) -> float:
+    for _ in range(warmup):
+        function()
+    torch.cuda.synchronize()
+    starts = []
+    ends = []
+    for _ in range(iterations):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        function()
+        end.record()
+        starts.append(start)
+        ends.append(end)
+    torch.cuda.synchronize()
+    return statistics.median(
+        start.elapsed_time(end) for start, end in zip(starts, ends)
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Standalone DominusUltra RoPE check")
+    parser.add_argument("--batch-size", type=int, default=2)
+    parser.add_argument("--heads", type=int, default=8)
+    parser.add_argument("--seq-len", type=int, default=512)
+    parser.add_argument("--head-dim", type=int, default=64)
+    parser.add_argument("--dtype", choices=("float16", "bfloat16"), default="float16")
+    parser.add_argument("--warmup", type=int, default=10)
+    parser.add_argument("--iterations", type=int, default=50)
+    args = parser.parse_args()
+
+    if not torch.cuda.is_available():
+        print("CUDA is required")
+        return 2
+    if args.dtype == "bfloat16" and not torch.cuda.is_bf16_supported():
+        print("This GPU/runtime does not report bfloat16 support")
+        return 2
+    dtype = torch.float16 if args.dtype == "float16" else torch.bfloat16
     torch.manual_seed(42)
-    configs = [
-        (2, 8, 512, 64),
-        (2, 8, 2048, 128),
-        (4, 32, 4096, 128),
-        (8, 64, 8192, 128),
-    ]
-    for bs, heads, seq_len, head_dim in configs:
-        q = torch.randn(bs, heads, seq_len, head_dim, device='cuda', dtype=torch.float16)
-        k = torch.randn(bs, heads, seq_len, head_dim, device='cuda', dtype=torch.float16)
-        torch.cuda.synchronize()
-        start = time.time()
-        for _ in range(30):
-            d_half = head_dim // 2
-            q1, q2 = q[..., :d_half], q[..., d_half:]
-            k1, k2 = k[..., :d_half], k[..., d_half:]
-            # Simulate PyTorch RoPE for comparison (using dynamic theta equivalent)
-            theta = 10000.0 ** (-torch.arange(0, head_dim, 2, device='cuda', dtype=torch.float32) / head_dim)
-            positions = torch.arange(seq_len, device='cuda', dtype=torch.float32).unsqueeze(1)
-            angles = positions * theta
-            cos = torch.cos(angles).unsqueeze(-1)
-            sin = torch.sin(angles).unsqueeze(-1)
-            q_rot = torch.cat((q1 * cos - q2 * sin, q1 * sin + q2 * cos), dim=-1)
-            k_rot = torch.cat((k1 * cos - k2 * sin, k1 * sin + k2 * cos), dim=-1)
-        torch.cuda.synchronize()
-        pytorch_time = (time.time() - start) / 30 * 1000
-        torch.cuda.synchronize()
-        start = time.time()
-        for _ in range(30):
-            out_q, out_k = apply_rope(q, k)
-        torch.cuda.synchronize()
-        triton_time = (time.time() - start) / 30 * 1000
-        tokens = bs * heads * seq_len
-        pytorch_tps = tokens / (pytorch_time / 1000) / 1e6
-        triton_tps = tokens / (triton_time / 1000) / 1e6
-        d_half = head_dim // 2
-        q1, q2 = q[..., :d_half], q[..., d_half:]
-        k1, k2 = k[..., :d_half], k[..., d_half:]
-        theta = 10000.0 ** (-torch.arange(0, head_dim, 2, device='cuda', dtype=torch.float32) / head_dim)
-        positions = torch.arange(seq_len, device='cuda', dtype=torch.float32).unsqueeze(1)
-        angles = positions * theta
-        cos = torch.cos(angles).unsqueeze(-1)
-        sin = torch.sin(angles).unsqueeze(-1)
-        q_torch = torch.cat((q1 * cos - q2 * sin, q1 * sin + q2 * cos), dim=-1)
-        k_torch = torch.cat((k1 * cos - k2 * sin, k1 * sin + k2 * cos), dim=-1)
-        assert torch.allclose(out_q, q_torch, atol=1e-4, rtol=1e-3), "Q mismatch"
-        assert torch.allclose(out_k, k_torch, atol=1e-4, rtol=1e-3), "K mismatch"
-        # Backward gradient numerical check (2026 Elite)
-        grad_out_q = torch.randn_like(out_q)
-        grad_out_k = torch.randn_like(out_k)
-        grad_q_triton, grad_k_triton = apply_rope_backward(grad_out_q, grad_out_k)
-        # Finite diff check for q
-        def rope_func_q(q_in):
-            return apply_rope(q_in, k)[0]
-        grads_fd_q = _finite_diff_grad_check(rope_func_q, [q], [out_q], [grad_out_q])
-        assert torch.allclose(grad_q_triton, grads_fd_q[0], atol=1e-3, rtol=1e-2), "Backward Q grad mismatch"
-        # Finite diff check for k
-        def rope_func_k(k_in):
-            return apply_rope(q, k_in)[1]
-        grads_fd_k = _finite_diff_grad_check(rope_func_k, [k], [out_k], [grad_out_k])
-        assert torch.allclose(grad_k_triton, grads_fd_k[0], atol=1e-3, rtol=1e-2), "Backward K grad mismatch"
-        print(f"bs={bs} heads={heads} seq={seq_len} d={head_dim}")
-        print(f"PyTorch: {pytorch_time:6.2f} ms | {pytorch_tps:5.1f} M tok/s")
-        print(f"Triton: {triton_time:6.2f} ms | {triton_tps:5.1f} M tok/s")
-        print(f"Speedup: {triton_tps / pytorch_tps:.2f}×")
-        print()
+    shape = (args.batch_size, args.heads, args.seq_len, args.head_dim)
+    q = torch.randn(shape, device="cuda", dtype=dtype)
+    k = torch.randn(shape, device="cuda", dtype=dtype)
+    cos, sin = make_half_split_pos_emb(args.seq_len, args.head_dim, "cuda", dtype)
+    q_expected = _reference(q, cos, sin)
+    k_expected = _reference(k, cos, sin)
+    q_actual, k_actual = apply_rope(q, k)
+    tolerance = 2.0e-2 if dtype == torch.bfloat16 else 6.0e-3
+    passed = torch.allclose(
+        q_actual, q_expected, atol=tolerance, rtol=tolerance
+    ) and torch.allclose(k_actual, k_expected, atol=tolerance, rtol=tolerance)
+    max_error = max(
+        (q_actual.float() - q_expected.float()).abs().max().item(),
+        (k_actual.float() - k_expected.float()).abs().max().item(),
+    )
+    median_ms = _time_cuda(lambda: apply_rope(q, k), args.warmup, args.iterations)
+    token_positions = args.batch_size * args.heads * args.seq_len
+    print(f"Device: {torch.cuda.get_device_name(0)}")
+    print(f"Shape: {shape} | dtype: {args.dtype}")
+    print(f"Correctness: {'PASS' if passed else 'FAIL'} | max error: {max_error:.6g}")
+    print(f"Median: {median_ms:.4f} ms")
+    print(f"Token positions/s: {token_positions / (median_ms / 1000.0):,.0f}")
+    return 0 if passed else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

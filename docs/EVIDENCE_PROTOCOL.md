@@ -6,11 +6,15 @@ DominusUltra does not treat a screenshot, a collected test count, or a speedup p
 
 Open the [Colab GPU evidence notebook](https://colab.research.google.com/github/MiMindMendinc/DominusUltra/blob/main/colab/DominusUltra_GPU_Evidence.ipynb), select a GPU runtime, and run every cell. The notebook produces a ZIP containing JSON and Markdown reports.
 
+The setup cell pins commit `a0d11750a9d5dfe858b2fa33348f8085e9bd5f2a` and verifies the checkout before installing dependencies. It does not follow the old evidence branch or the latest `main`. If a reused checkout has local changes, setup stops and preserves them. To verify a newer kernel revision, explicitly update the full `target_commit` SHA and identify that same revision in the verification request. The notebook's own revision and the kernel revision it tests can differ; the report must record the latter.
+
 To run locally on an NVIDIA CUDA machine:
 
 ```bash
 git clone https://github.com/MiMindMendinc/DominusUltra.git
 cd DominusUltra
+git fetch origin a0d11750a9d5dfe858b2fa33348f8085e9bd5f2a
+git checkout --detach a0d11750a9d5dfe858b2fa33348f8085e9bd5f2a
 python -m venv .venv
 source .venv/bin/activate  # Windows: .\.venv\Scripts\activate
 python -m pip install --upgrade pip

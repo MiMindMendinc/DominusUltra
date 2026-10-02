@@ -13,12 +13,11 @@ DominusUltra is a Triton CUDA research kernel for fused-RoPE causal attention an
 
 - **GPU:** Tesla T4 sm_75 · Triton 3.6.0 · PyTorch 2.11.0+cu130
 - **Pinned commit:** `a0d11750a9d5dfe858b2fa33348f8085e9bd5f2a`
-- **Suite:** `gpu_evidence.py --suite quick` · verdict **PASS**
-- **Clean artifact:** [`dominus-ultra-evidence-20261001T215817Z.json`](docs/evidence/raw/dominus-ultra-evidence-20261001T215817Z.json) (`dirty=false`, payload SHA-256 `148bf0c48796376d356c59803745e3d7d04c4a684a93941e6161af8f9ba8ec2a`)
-- **Summary:** [`docs/evidence/T4_2026-10-01.md`](docs/evidence/T4_2026-10-01.md) · tracking [issue #17](https://github.com/MiMindMendinc/DominusUltra/issues/17)
-- **Headline (clean only):** **2.742×** vs Torch SDPA on `decode:B2:Hq8:Hkv8:T128:D64` (median ms; RoPE outside timer)
+- **Clean quick (release):** [`…20261002T022606Z.json`](docs/evidence/raw/dominus-ultra-evidence-20261002T022606Z.json) · `dirty=false` · payload SHA-256 `35981c65d2ce2c6b18a790a8f4a8ce8143683b4aacc0481a0e41154a0a17ad02` · verdict **PASS** · headline **2.503×** vs Torch SDPA on `decode:B2:Hq8:Hkv8:T128:D64`
+- **Full suite:** [`…20261002T023310Z.json`](docs/evidence/raw/dominus-ultra-evidence-20261002T023310Z.json) · 10/10 **PASS** · worktree `dirty=true` (prior evidence files only; `dominus_ultra.py` SHA matches clean) · best **5.136×** on `decode:B4:Hq16:Hkv4:T1024:D64` · worst **0.057×** prefill loss (kept in table)
+- **Summary:** [`docs/evidence/T4_2026-10-02.md`](docs/evidence/T4_2026-10-02.md) · prior day [`T4_2026-10-01.md`](docs/evidence/T4_2026-10-01.md) · [#17](https://github.com/MiMindMendinc/DominusUltra/issues/17)
 - **Baseline:** unfused PyTorch RoPE + `scaled_dot_product_attention` — not FlashAttention
-- Dirty/patched runs in the same folder are labeled dirty and are **not** the release claim
+
 
 ## Why it matters
 

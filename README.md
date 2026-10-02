@@ -9,6 +9,17 @@ DominusUltra is a Triton CUDA research kernel for fused-RoPE causal attention an
 [![Triton](https://img.shields.io/badge/Triton-3.0%2B-111111.svg)](requirements.txt)
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MiMindMendinc/DominusUltra/blob/main/colab/DominusUltra_GPU_Evidence.ipynb)
 
+## Latest gated run (Tesla T4)
+
+- **GPU:** Tesla T4 sm_75 · Triton 3.6.0 · PyTorch 2.11.0+cu130
+- **Pinned commit:** `a0d11750a9d5dfe858b2fa33348f8085e9bd5f2a`
+- **Suite:** `gpu_evidence.py --suite quick` · verdict **PASS**
+- **Clean artifact:** [`dominus-ultra-evidence-20261001T215817Z.json`](docs/evidence/raw/dominus-ultra-evidence-20261001T215817Z.json) (`dirty=false`, payload SHA-256 `148bf0c48796376d356c59803745e3d7d04c4a684a93941e6161af8f9ba8ec2a`)
+- **Summary:** [`docs/evidence/T4_2026-10-01.md`](docs/evidence/T4_2026-10-01.md) · tracking [issue #17](https://github.com/MiMindMendinc/DominusUltra/issues/17)
+- **Headline (clean only):** **2.742×** vs Torch SDPA on `decode:B2:Hq8:Hkv8:T128:D64` (median ms; RoPE outside timer)
+- **Baseline:** unfused PyTorch RoPE + `scaled_dot_product_attention` — not FlashAttention
+- Dirty/patched runs in the same folder are labeled dirty and are **not** the release claim
+
 ## Why it matters
 
 Production attention libraries are intentionally opaque at the kernel boundary. This repository keeps prefill, decode, rotary embeddings, grouped-query head mapping, and the PyTorch reference close enough to read together. It is intended for correctness work and controlled CUDA experiments, not as a drop-in replacement for a production attention library.

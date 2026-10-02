@@ -9,6 +9,8 @@ DominusUltra is a Triton CUDA research kernel for fused-RoPE causal attention an
 [![Triton](https://img.shields.io/badge/Triton-3.0%2B-111111.svg)](requirements.txt)
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/MiMindMendinc/DominusUltra/blob/main/colab/DominusUltra_GPU_Evidence.ipynb)
 
+> **CI scope:** Green CI is CPU/contract. GPU proof is the gated Colab artifacts under [`docs/evidence/`](docs/evidence/) — see [Latest gated run](#latest-gated-run-tesla-t4).
+
 ## Latest gated run (Tesla T4)
 
 - **GPU:** Tesla T4 sm_75 · Triton 3.6.0 · PyTorch 2.11.0+cu130

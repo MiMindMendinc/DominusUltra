@@ -71,6 +71,8 @@ The test suite treats PyTorch as the reference implementation:
 3. Use PyTorch scaled dot-product attention as the baseline.
 4. Compare Triton output against the reference with dtype-aware tolerances.
 
+RoPE is NeoX half-split (tables `[seq, D/2]`), not interleaved; RoPE multiply-add runs in fp16/bf16 so expect 1–2 ULP vs an fp32 reference; tolerances stay dtype-aware.
+
 ```mermaid
 flowchart LR
     INPUT["Random test tensors"] --> REF["PyTorch reference"]

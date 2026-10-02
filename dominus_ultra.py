@@ -10,7 +10,7 @@ Supports:
 - Arbitrary head dimensions (power-of-2)
 - Grouped Query Attention (GQA / MQA)
 - Causal masking
-- LSE output for correct incremental decoding
+- Prefill LSE output for correct incremental decoding (decode returns attention output only; online softmax stats are not exported)
 
 Requirements: torch>=2.4, triton>=3.0, NVIDIA CUDA GPU (Ampere+ recommended)
 """

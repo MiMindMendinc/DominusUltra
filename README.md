@@ -13,46 +13,31 @@ It ships a **142-case CUDA pytest matrix** (GPU required; CI does not run it), s
 
 > **CI scope:** Green CI is CPU/contract. GPU proof is the gated Colab artifacts under [`docs/evidence/`](docs/evidence/) — see [Latest gated run](#latest-gated-run-tesla-t4).
 
-## Latest gated run (Tesla T4)
+## At a glance
 
-- **GPU:** Tesla T4 sm_75 · Triton 3.6.0 · PyTorch 2.11.0+cu130
-- **Pinned commit:** `a0d11750a9d5dfe858b2fa33348f8085e9bd5f2a`
-- **Clean quick (release):** [`…20261002T022606Z.json`](docs/evidence/raw/dominus-ultra-evidence-20261002T022606Z.json) · `dirty=false` · payload SHA-256 `35981c65d2ce2c6b18a790a8f4a8ce8143683b4aacc0481a0e41154a0a17ad02` · verdict **PASS** · decode **2.503×** on `decode:B2:Hq8:Hkv8:T128:D64`, prefill **0.451×** loss on `prefill:B1:Hq8:Hkv2:T257:D64`. Quote both.
-- **Full suite:** [`…20261002T023310Z.json`](docs/evidence/raw/dominus-ultra-evidence-20261002T023310Z.json) · 10/10 **PASS** · worktree `dirty=true` (prior evidence files only; `dominus_ultra.py` SHA matches clean) · vs SDPA best **5.136×** on `decode:B4:Hq16:Hkv4:T1024:D64` and worst **0.057×** on `prefill:B1:Hq8:Hkv2:T512:D128`. Short-cache decode wins are often launch-bound, not a bandwidth or long-context claim. Prefill losses are real — quote them with any win.
-- **Summary:** [`docs/evidence/T4_2026-10-02.md`](docs/evidence/T4_2026-10-02.md) · prior day [`T4_2026-10-01.md`](docs/evidence/T4_2026-10-01.md) · [#17](https://github.com/MiMindMendinc/DominusUltra/issues/17)
-- **Baseline:** unfused PyTorch RoPE + `scaled_dot_product_attention` — not FlashAttention
+| | |
+| --- | --- |
+| **What** | Fused-RoPE causal attention kernels (prefill + decode) with grouped-query / multi-query head mapping, written in Triton |
+| **Status** | Research / alpha (`dominus-ultra` 0.1.0 in `setup.py`) |
+| **Tech stack** | Python 3.8+, PyTorch 2.4+, Triton 3.0+, NumPy; pytest, ruff, mypy; GitHub Actions (CPU contract checks); Google Colab notebook for GPU evidence |
+| **Hardware** | NVIDIA CUDA GPU required for the fused kernels; gated evidence so far is Tesla T4 only |
+| **Baseline** | Unfused PyTorch RoPE + `scaled_dot_product_attention` — not FlashAttention |
 
 ## Why it matters
 
 Production attention libraries are intentionally opaque at the kernel boundary. This repository keeps prefill, decode, rotary embeddings, grouped-query head mapping, and the PyTorch reference close enough to read together. It is intended for correctness work and controlled CUDA experiments, not as a drop-in replacement for a production attention library.
 
-## Benchmarks
+## Architecture
 
-`benchmark.py` compares the Triton path with this repository's unfused PyTorch reference: RoPE is applied in PyTorch, then `torch.nn.functional.scaled_dot_product_attention` runs on the same tensor shapes. The default prefill sweep uses batch size 2, 32 query/KV heads, head dimension 64, sequence lengths 128–2048, and `bfloat16`; it also measures GQA at sequence length 1024. The decode sweep uses batch size 8, 32 heads, head dimension 64, and cache lengths 128–2048.
+- `dominus_ultra.py` contains the fused-RoPE prefill kernel, decode kernel, and Python launch wrappers.
+- `test_dominus.py` defines the PyTorch-reference correctness contract.
+- `benchmark.py` runs synchronized latency comparisons for MHA and GQA shapes.
+- `gpu_evidence.py` runs the correctness-gated, metadata-complete public evidence matrix.
+- `demo_speedtest.py` records hardware metadata, latency, speedup, and maximum numerical error.
+- `rope.py` contains the standalone forward/backward RoPE experiment.
+- `examples/webgpu-rope-demo.html` provides a browser-side RoPE visualization and CPU reference timing.
 
-```bash
-python benchmark.py --mode all --dtype bfloat16
-```
-
-The only citable GPU result is the gated T4 report above — not a single speedup, and not a multi-GPU or FlashAttention comparison. Do not quote 2.503× or 5.136× without the matching prefill loss (0.451× quick, 0.057× full). The earlier `7x` / `~1.8 TB/s` row stays removed: no raw result accompanied it, and this repository does not calculate effective bandwidth.
-
-A preliminary [operator-supplied Colab CUDA verification capture](docs/evidence/COLAB_T4_ROPE_8192.md) is preserved with its exact visible numbers and limitations. It covers a standalone RoPE experiment—not the fused prefill/decode kernel—and is not promoted as reviewer-complete evidence because the screenshot omits required environment metadata and raw output.
-
-For the release-gating quick matrix:
-
-```bash
-python gpu_evidence.py --suite quick --dtype auto --warmup 10 --iterations 50
-```
-
-For a broader matrix across both supported low-precision dtypes where the GPU supports them:
-
-```bash
-python gpu_evidence.py --suite full --dtype both --warmup 20 --iterations 100
-```
-
-The runner writes Markdown and raw JSON under `benchmark_results/`. It records the exact commit, source hashes, GPU/software stack, correctness error, LSE error, every CUDA-event sample, summary statistics, and a SHA-256 payload digest. It exits nonzero on compile errors, runtime failures, or tolerance failures. See the [evidence protocol](docs/EVIDENCE_PROTOCOL.md), or use the one-click Colab badge above and submit either a passing or failing report through the [benchmark issue template](https://github.com/MiMindMendinc/DominusUltra/issues/new?template=benchmark_result.md).
-
-`demo_speedtest.py` remains available for a recordable single-shape terminal demo, but its output is not the release gate.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the tiled prefill/decode data flow and [docs/RECORDING_GUIDE.md](docs/RECORDING_GUIDE.md) for benchmark capture guidance.
 
 ## Install and quickstart
 
@@ -98,6 +83,8 @@ print(lse.shape)  # torch.Size([1, 8, 512])
 
 Requirements: Python 3.8+, PyTorch 2.4+, Triton 3.0+, and an NVIDIA CUDA GPU. Ampere or newer is recommended for the included kernel configurations.
 
+No GPU? Use the one-click Colab badge above, which runs the gated evidence notebook.
+
 ## Test suite
 
 ```bash
@@ -114,17 +101,42 @@ mypy dominus_ultra.py rope.py benchmark.py demo_speedtest.py
 python -m compileall -q dominus_ultra.py rope.py benchmark.py demo_speedtest.py
 ```
 
-## Architecture
+## Latest gated run (Tesla T4)
 
-- `dominus_ultra.py` contains the fused-RoPE prefill kernel, decode kernel, and Python launch wrappers.
-- `test_dominus.py` defines the PyTorch-reference correctness contract.
-- `benchmark.py` runs synchronized latency comparisons for MHA and GQA shapes.
-- `gpu_evidence.py` runs the correctness-gated, metadata-complete public evidence matrix.
-- `demo_speedtest.py` records hardware metadata, latency, speedup, and maximum numerical error.
-- `rope.py` contains the standalone forward/backward RoPE experiment.
-- `examples/webgpu-rope-demo.html` provides a browser-side RoPE visualization and CPU reference timing.
+- **GPU:** Tesla T4 sm_75 · Triton 3.6.0 · PyTorch 2.11.0+cu130
+- **Pinned commit:** `a0d11750a9d5dfe858b2fa33348f8085e9bd5f2a`
+- **Clean quick (release):** [`…20261002T022606Z.json`](docs/evidence/raw/dominus-ultra-evidence-20261002T022606Z.json) · `dirty=false` · payload SHA-256 `35981c65d2ce2c6b18a790a8f4a8ce8143683b4aacc0481a0e41154a0a17ad02` · verdict **PASS** · decode **2.503×** on `decode:B2:Hq8:Hkv8:T128:D64`, prefill **0.451×** loss on `prefill:B1:Hq8:Hkv2:T257:D64`. Quote both.
+- **Full suite:** [`…20261002T023310Z.json`](docs/evidence/raw/dominus-ultra-evidence-20261002T023310Z.json) · 10/10 **PASS** · worktree `dirty=true` (prior evidence files only; `dominus_ultra.py` SHA matches clean) · vs SDPA best **5.136×** on `decode:B4:Hq16:Hkv4:T1024:D64` and worst **0.057×** on `prefill:B1:Hq8:Hkv2:T512:D128`. Short-cache decode wins are often launch-bound, not a bandwidth or long-context claim. Prefill losses are real — quote them with any win.
+- **Summary:** [`docs/evidence/T4_2026-10-02.md`](docs/evidence/T4_2026-10-02.md) · prior day [`T4_2026-10-01.md`](docs/evidence/T4_2026-10-01.md) · [#17](https://github.com/MiMindMendinc/DominusUltra/issues/17)
+- **Baseline:** unfused PyTorch RoPE + `scaled_dot_product_attention` — not FlashAttention
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the tiled prefill/decode data flow and [docs/RECORDING_GUIDE.md](docs/RECORDING_GUIDE.md) for benchmark capture guidance.
+## Benchmarks
+
+`benchmark.py` compares the Triton path with this repository's unfused PyTorch reference: RoPE is applied in PyTorch, then `torch.nn.functional.scaled_dot_product_attention` runs on the same tensor shapes. The default prefill sweep uses batch size 2, 32 query/KV heads, head dimension 64, sequence lengths 128–2048, and `bfloat16`; it also measures GQA at sequence length 1024. The decode sweep uses batch size 8, 32 heads, head dimension 64, and cache lengths 128–2048.
+
+```bash
+python benchmark.py --mode all --dtype bfloat16
+```
+
+The only citable GPU result is the gated T4 report above — not a single speedup, and not a multi-GPU or FlashAttention comparison. Do not quote 2.503× or 5.136× without the matching prefill loss (0.451× quick, 0.057× full). The earlier `7x` / `~1.8 TB/s` row stays removed: no raw result accompanied it, and this repository does not calculate effective bandwidth.
+
+A preliminary [operator-supplied Colab CUDA verification capture](docs/evidence/COLAB_T4_ROPE_8192.md) is preserved with its exact visible numbers and limitations. It covers a standalone RoPE experiment—not the fused prefill/decode kernel—and is not promoted as reviewer-complete evidence because the screenshot omits required environment metadata and raw output.
+
+For the release-gating quick matrix:
+
+```bash
+python gpu_evidence.py --suite quick --dtype auto --warmup 10 --iterations 50
+```
+
+For a broader matrix across both supported low-precision dtypes where the GPU supports them:
+
+```bash
+python gpu_evidence.py --suite full --dtype both --warmup 20 --iterations 100
+```
+
+The runner writes Markdown and raw JSON under `benchmark_results/`. It records the exact commit, source hashes, GPU/software stack, correctness error, LSE error, every CUDA-event sample, summary statistics, and a SHA-256 payload digest. It exits nonzero on compile errors, runtime failures, or tolerance failures. See the [evidence protocol](docs/EVIDENCE_PROTOCOL.md), or use the one-click Colab badge above and submit either a passing or failing report through the [benchmark issue template](https://github.com/MiMindMendinc/DominusUltra/issues/new?template=benchmark_result.md).
+
+`demo_speedtest.py` remains available for a recordable single-shape terminal demo, but its output is not the release gate.
 
 ## Correctness and limitations
 
@@ -136,6 +148,10 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the tiled prefill/decode da
 - Performance depends on GPU architecture, driver/runtime, dtype, shape, and installed PyTorch/Triton versions.
 
 A fused-RoPE experiment related to this work was submitted to `xai-org/grok-1` as [PR #434](https://github.com/xai-org/grok-1/pull/434). That pull request is separate from this repository's correctness and benchmark evidence.
+
+## Project status
+
+Research code, alpha. Correctness-gated GPU evidence exists for one GPU family (Tesla T4). Not production-audited and not a drop-in attention library.
 
 ## License
 
